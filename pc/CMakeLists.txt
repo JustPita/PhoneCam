@@ -27,6 +27,7 @@ add_executable(PhoneCam WIN32
     app/vcam.cpp
     app/install.cpp
     app/playout.cpp
+    app/obs.cpp
     app/app.rc
 )
 # La DLL est embarquée dans l'exe (ressource RCDATA 2) : un seul fichier à distribuer.
@@ -36,6 +37,8 @@ set_source_files_properties(app/app.rc PROPERTIES
     OBJECT_DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/PhoneCamSource.dll;${CMAKE_CURRENT_SOURCE_DIR}/app/app.manifest;${CMAKE_CURRENT_SOURCE_DIR}/app/phonecam.ico")
 # Outil de diagnostic : lit quelques images de la webcam « PhoneCam ».
 add_executable(camtest tools/camtest.cpp)
+# Outil de diagnostic : lit et décode le flux réseau « OBS » (MPEG-TS sur HTTP).
+add_executable(tstest tools/tstest.cpp)
 
 # Le manifeste (contrôles communs v6, DPI, UTF-8) est fourni par app.rc.
 target_link_options(PhoneCam PRIVATE /MANIFEST:NO)

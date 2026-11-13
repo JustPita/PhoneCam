@@ -41,6 +41,18 @@ mode <id caméra> <largeur> <hauteur> <fps max> <0|1 haute vitesse> <codec>
 
 Une ligne `mode` par couple (taille, codec) : `fps max` tient compte à la fois de la caméra et de l'encodeur matériel.
 
+## Flux réseau pour OBS (optionnel)
+
+Désactivé par défaut ; réactivé au démarrage seulement s'il l'était la fois précédente.
+Le téléphone (bouton « OBS ») et l'application PC (« Diffuser pour OBS sur le réseau ») servent
+le même flux sur le **port TCP 38510** : `GET /` renvoie `HTTP/1.0 200`, `Content-Type: video/mp2t`,
+puis un **MPEG-TS** continu (un programme, PID vidéo 0x100, H.264 type 0x1B ou HEVC type 0x24,
+PTS à 90 kHz, PAT/PMT et PCR devant chaque image clé). Aucun réencodage : ce sont les images du
+téléphone. Chaque lecteur commence à une image clé ; un lecteur trop lent est resynchronisé.
+
+Côté téléphone, la caméra démarre quand un lecteur OBS se connecte même sans PC, et s'arrête quand
+plus personne (ni PC ni OBS) ne regarde.
+
 ## Découverte Wi-Fi
 
 Le téléphone diffuse chaque seconde un datagramme UDP en broadcast sur le **port 38501** :

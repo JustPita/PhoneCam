@@ -18,6 +18,7 @@
 #include "framewriter.h"
 #include "install.h"
 #include "net.h"
+#include "obs.h"
 #include "playout.h"
 #include "settings.h"
 #include "theme.h"
@@ -117,7 +118,7 @@ enum : UINT {
     WM_APP_CONNECTED,
     WM_APP_CONNECT_FAILED,
 };
-enum : UINT { IDM_OPEN = 200, IDM_CONNECT, IDM_QUIT, IDM_AUTOSTART };
+enum : UINT { IDM_OPEN = 200, IDM_CONNECT, IDM_QUIT, IDM_AUTOSTART, IDM_OBS };
 enum : int {
     ID_SOURCE = 100,
     ID_MANUAL,
@@ -135,6 +136,9 @@ enum : int {
     ID_ADVANCED,
     ID_MIRROR_LABEL,
     ID_ROTATE_LABEL,
+    ID_OBS,
+    ID_OBS_LABEL,
+    ID_OBS_URL,
     ID_TIMER_STATS = 1,
     ID_TIMER_DISCOVERY = 2,
 };
@@ -152,6 +156,9 @@ struct App {
     // Volet avancé
     HWND source, manual, res, fps, codec, bitrate, rotate, rotateLabel, smooth, status;
     HWND lblSource, lblIp, lblRes, lblBitrate, lblSmooth;
+    HWND obsCheck, obsLabel, obsUrl; // flux réseau pour OBS
+    ObsServer obs;
+    std::wstring obsError;
     bool advanced = false;
     float scale = 1.0f;
     RECT previewRect{}, headerRect{}, footerRect{};
@@ -299,6 +306,9 @@ static void OnFrameData(const uint8_t* data, size_t size, bool key, int64_t pts)
     g.lastArrival = now.QuadPart;
     g.lastPts = pts;
 
+    // Flux OBS : rediffusé tel quel (sans décodage ni réencodage).
+    g.obs.PushFrame(data, size, pts, key);
+
     if (!g.decoder.Codec().size()) return;
     if (g.waitingKey && !key) return;
     g.waitingKey = false;
@@ -330,6 +340,7 @@ static void OnFormat(const std::string& text) {
     g.lastPts = -1;
     g.lastArrival = 0;
     g.playout.Reset();
+    g.obs.SetCodec(codec);
     if (!g.decoder.Open(codec, w, h, &err)) g.decoderError = err;
     g.waitingKey = true;
     VirtualCamera::SaveFormat(w, h, fps);
@@ -719,6 +730,27 @@ static void AutoConnectTick() {
     StartConnect(targets, true);
 }
 
+// Active ou coupe le flux réseau pour OBS (et mémorise le choix si demandé).
+static void SetObs(bool on, bool remember) {
+    g.obsError.clear();
+    if (on) {
+        std::string err;
+        if (!g.obs.Start(&err)) {
+            g.obsError = W(err);
+            on = false;
+        }
+    } else {
+        g.obs.Stop();
+    }
+    if (remember) settings::SetDword(L"ObsEnabled", on ? 1 : 0);
+    SendMessageW(g.obsCheck, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
+    std::wstring ip = ObsServer::LocalAddress();
+    std::wstring url = on ? (ip.empty() ? L"(pas de réseau)" : L"http://" + ip + L":" + std::to_wstring(PHONECAM_OBS_PORT) + L"/")
+                          : L"";
+    SetWindowTextW(g.obsUrl, url.c_str());
+    EnableWindow(g.obsUrl, on);
+}
+
 static void EnsureVirtualCamera() {
     if (g.vcam.Active()) return;
     std::wstring err;
@@ -782,6 +814,7 @@ static void TrayMenu() {
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING | (settings::AutoStartEnabled() ? MF_CHECKED : 0), IDM_AUTOSTART,
                 L"Démarrer avec Windows");
+    AppendMenuW(m, MF_STRING | (g.obs.Running() ? MF_CHECKED : 0), IDM_OBS, L"Diffuser pour OBS sur le réseau");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_QUIT, L"Quitter");
     SetMenuDefaultItem(m, IDM_OPEN, FALSE);
@@ -816,6 +849,7 @@ static void UpdateStats() {
     }
     g.footerWarn = true;
     if (!g.vcamError.empty()) g.footer = g.vcamError;
+    else if (!g.obsError.empty()) g.footer = g.obsError;
     else if (!g.decoderError.empty() && connected) g.footer = W(g.decoderError);
     else if (!g.phoneMessage.empty()) g.footer = g.phoneMessage;
     else {
@@ -834,6 +868,10 @@ static void UpdateStats() {
     // --- Détails techniques (volet avancé) ---
     std::wostringstream os;
     os << L"Caméra virtuelle : " << (g.vcam.Active() ? (g.consumer ? L"utilisée" : L"prête") : L"inactive");
+    if (g.obs.Running()) {
+        const int n = g.obs.Clients();
+        os << L" · OBS : " << n << (n > 1 ? L" lecteurs" : L" lecteur");
+    }
     if (connected) {
         if (!g.formatText.empty()) {
             os << L" · " << W(kvFmt["width"]) << L"×" << W(kvFmt["height"]) << L" @ " << W(kvFmt["fps"]) << L" i/s "
@@ -897,9 +935,9 @@ static void ApplyTheme() {
     g.theme.Load();
     g.theme.ApplyWindow(g.wnd);
     for (HWND h : {g.camera, g.preset, g.source, g.res, g.fps, g.codec, g.smooth}) g.theme.ApplyControl(h, Theme::Combo);
-    for (HWND h : {g.manual, g.bitrate}) g.theme.ApplyControl(h, Theme::Edit);
+    for (HWND h : {g.manual, g.bitrate, g.obsUrl}) g.theme.ApplyControl(h, Theme::Edit);
     for (HWND h : {g.connect, g.advancedBtn}) g.theme.ApplyControl(h, Theme::Button);
-    for (HWND h : {g.mirror, g.rotate}) g.theme.ApplyControl(h, Theme::Check);
+    for (HWND h : {g.mirror, g.rotate, g.obsCheck}) g.theme.ApplyControl(h, Theme::Check);
     InvalidateRect(g.wnd, nullptr, TRUE);
 }
 
@@ -932,8 +970,9 @@ static void Layout(HWND wnd) {
     y += rowH + gap;
 
     // Volet avancé
-    HWND adv[] = {g.lblSource, g.source, g.lblIp,     g.manual,      g.lblRes,    g.res,   g.fps,   g.codec,
-                  g.lblBitrate, g.bitrate, g.rotate, g.rotateLabel, g.lblSmooth, g.smooth, g.status};
+    HWND adv[] = {g.lblSource, g.source,   g.lblIp,       g.manual,    g.lblRes,  g.res,     g.fps,
+                  g.codec,     g.lblBitrate, g.bitrate,   g.rotate,    g.rotateLabel, g.lblSmooth, g.smooth,
+                  g.obsCheck,  g.obsLabel,   g.obsUrl,    g.status};
     for (HWND h : adv) ShowWindow(h, g.advanced ? SW_SHOW : SW_HIDE);
     if (g.advanced) {
         y += S(4);
@@ -957,6 +996,12 @@ static void Layout(HWND wnd) {
         place(g.rotateLabel, S(150));
         place(g.lblSmooth, S(62));
         place(g.smooth, S(210), S(200));
+        y += rowH + gap;
+        x = m;
+        place(g.obsCheck, S(20));
+        x -= gap - S(4);
+        place(g.obsLabel, S(230));
+        place(g.obsUrl, S(260));
         y += rowH + gap;
         MoveWindow(g.status, m, y, right - m, S(56), TRUE);
         y += S(56) + gap;
@@ -1103,6 +1148,11 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         for (const wchar_t* s : {L"Aucun (latence minimale)", L"Auto (selon la gigue)", L"50 ms", L"100 ms", L"150 ms", L"250 ms"})
             SendMessageW(g.smooth, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s));
         SendMessageW(g.smooth, CB_SETCURSEL, 0, 0);
+        g.obsCheck = MakeCtl(wnd, L"BUTTON", L"", BS_AUTOCHECKBOX | WS_TABSTOP, ID_OBS);
+        g.obsLabel = MakeLabel(wnd, L"Diffuser pour OBS sur le réseau", ID_OBS_LABEL);
+        // Adresse en lecture seule, sélectionnable pour la copier dans OBS.
+        g.obsUrl = MakeCtl(wnd, L"EDIT", L"", ES_READONLY | ES_AUTOHSCROLL | WS_BORDER, ID_OBS_URL);
+        g.obs.onClientJoined = [] { g.conn.Send('K', ""); }; // un lecteur OBS démarre sur une image clé
         g.playout.Start([](const DecodedFrame& f) {
             if (g.writerReset.exchange(false)) g.writer.Close();
             g.consumer = g.writer.Write(f, g.optMirror, g.optRotate);
@@ -1116,6 +1166,8 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
         TrayAdd();
         g.discovery.Start();
+        // Flux OBS : seulement s'il avait été activé la dernière fois.
+        SetObs(settings::GetDword(L"ObsEnabled", 0) != 0, false);
 
         // Réglages mémorisés
         g.optMirror = settings::GetDword(L"Mirror", 0) != 0;
@@ -1221,6 +1273,10 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             } else {
                 ConnectChosen();
             }
+            UpdateStats();
+        } else if (id == IDM_OBS || id == ID_OBS || (id == ID_OBS_LABEL && code == STN_CLICKED)) {
+            bool on = id == ID_OBS ? SendMessageW(g.obsCheck, BM_GETCHECK, 0, 0) == BST_CHECKED : !g.obs.Running();
+            SetObs(on, true);
             UpdateStats();
         } else if (id == IDM_AUTOSTART) {
             settings::SetAutoStart(!settings::AutoStartEnabled(), installer::SelfPath());
@@ -1370,6 +1426,7 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.autoConnect = false;
         if (g.connectThread.joinable()) g.connectThread.join();
         g.conn.Disconnect();
+        g.obs.Stop();
         g.playout.Stop();
         g.discovery.Stop();
         g.decoder.Close();

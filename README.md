@@ -51,6 +51,16 @@ Installez `PhoneCam.apk` (ou compilez-le), ouvrez l'application et autorisez la 
 Fermer ou réduire la fenêtre la range dans la zone de notification : la webcam reste disponible.
 Clic droit sur l'icône → *Quitter* pour l'arrêter.
 
+### Flux pour OBS sur le réseau (optionnel)
+
+Pour utiliser le téléphone dans OBS sur **un autre PC** (ou sans l'application PC) :
+
+- **depuis le téléphone** : touchez **OBS** en haut de l'écran ; l'adresse s'affiche (`http://IP-du-téléphone:38510/`) ;
+- **depuis le PC** : *Réglages avancés* → **Diffuser pour OBS sur le réseau** ; l'adresse s'affiche à côté.
+
+Dans OBS : *Sources* → **Source média**, décochez *Fichier local*, collez l'adresse dans *Entrée*.
+L'option reste désactivée tant que vous ne l'activez pas, puis est mémorisée.
+
 ## Architecture
 
 ```

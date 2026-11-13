@@ -42,6 +42,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private lateinit var screenButton: ImageButton
     private lateinit var powerButton: ImageButton
     private lateinit var toast: TextView
+    private lateinit var obsButton: TextView
 
     private val handler = Handler(Looper.getMainLooper())
     private var resumed = false
@@ -75,6 +76,18 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         screenButton = findViewById(R.id.screenButton)
         powerButton = findViewById(R.id.powerButton)
         toast = findViewById(R.id.toast)
+        obsButton = findViewById(R.id.obsButton)
+        obsButton.setOnClickListener {
+            val server = StreamService.instance ?: return@setOnClickListener
+            val on = !server.obsEnabled
+            server.setObsEnabled(on)
+            getSharedPreferences(StreamService.PREFS, MODE_PRIVATE).edit().putBoolean(StreamService.PREF_OBS, on).apply()
+            showToast(
+                if (on) "Flux OBS activé : ${obsUrl() ?: "pas de réseau"}\n(Source média OBS, « Fichier local » décoché)"
+                else "Flux OBS désactivé"
+            )
+            refresh()
+        }
 
         preview.surfaceTextureListener = this
         preview.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> transformKey = "" }
@@ -236,6 +249,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     private fun localIps(): List<String> = try {
         NetworkInterface.getNetworkInterfaces().toList()
             .filter { it.isUp && !it.isLoopback }
+            .sortedBy { if (it.name.startsWith("wlan")) 0 else 1 } // Wi-Fi d'abord (pas l'IP mobile)
             .flatMap { it.inetAddresses.toList() }
             .filterIsInstance<Inet4Address>()
             .mapNotNull { it.hostAddress }
@@ -243,11 +257,20 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         emptyList()
     }
 
+    /** Adresse à coller dans OBS (IP Wi-Fi du téléphone). */
+    private fun obsUrl(): String? = localIps().firstOrNull()?.let { "http://$it:${ObsServer.PORT}/" }
+
     private fun refresh() {
         val st = StreamService.State
         val server = StreamService.instance
         val streaming = st.running && st.streaming
         applyKeepScreenOn()
+
+        val obsOn = server?.obsEnabled == true
+        obsButton.visibility = if (st.running) View.VISIBLE else View.GONE
+        obsButton.alpha = if (obsOn) 1f else 0.5f
+        obsButton.setTextColor(if (obsOn) 0xFF4CC2FF.toInt() else 0xFFFFFFFF.toInt())
+        obsButton.text = if (obsOn) "OBS ●" else "OBS"
 
         preview.visibility = if (streaming) View.VISIBLE else View.INVISIBLE
         waiting.visibility = if (streaming) View.GONE else View.VISIBLE
@@ -265,7 +288,14 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 address.text = ""
             }
             streaming -> {
-                setStatus(if (usb) "En direct vers le PC · USB" else "En direct vers le PC · Wi-Fi", 0xFFE53935.toInt())
+                setStatus(
+                    when {
+                        st.client == null -> "En direct pour OBS"
+                        usb -> "En direct vers le PC · USB"
+                        else -> "En direct vers le PC · Wi-Fi"
+                    },
+                    0xFFE53935.toInt(),
+                )
                 startButton.visibility = View.GONE
             }
             st.client != null -> {
@@ -284,7 +314,9 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         }
         if (st.running && !streaming) {
             val ips = localIps()
-            address.text = if (ips.isEmpty()) "Aucun réseau Wi-Fi" else ips.joinToString("\n") { "IP du téléphone : $it" }
+            var text = if (ips.isEmpty()) "Aucun réseau Wi-Fi" else ips.joinToString("\n") { "IP du téléphone : $it" }
+            if (obsOn) text += "\nOBS : ${obsUrl() ?: "pas de réseau"}"
+            address.text = text
         }
 
         // Détails (format, débit) et aperçu
@@ -301,6 +333,11 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
             lastTime = now
             lastBytes = bytes
             lastFrames = frames
+            if (obsOn) {
+                val n = server.obsClients
+                sb.append("\nOBS : ${obsUrl() ?: "pas de réseau"}")
+                if (n > 0) sb.append("  ·  $n lecteur${if (n > 1) "s" else ""}")
+            }
             details.text = sb.toString()
             attachPreviewIfNeeded(server)
             if (info != null) updateTransform(info)
