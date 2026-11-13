@@ -71,6 +71,8 @@ private:
 
 // USB : « adb forward tcp:38500 tcp:38500 ». Renvoie false avec un message si adb manque ou si aucun appareil.
 bool AdbForward(std::string* message);
+// Lance l'application PhoneCam sur le téléphone USB si elle ne tourne pas. Renvoie true si elle a dû être lancée.
+bool AdbEnsureApp();
 std::wstring FindAdb();
 // Lance une commande sans fenêtre, récupère sa sortie et son code de retour.
 bool RunHidden(const std::wstring& cmdline, std::string* output, unsigned long* exitCode);

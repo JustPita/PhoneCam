@@ -240,6 +240,18 @@ bool RunHidden(const std::wstring& cmdline, std::string* output, DWORD* exitCode
     return true;
 }
 
+bool AdbEnsureApp() {
+    std::wstring adb = FindAdb();
+    if (adb.empty()) return false;
+    std::string out;
+    DWORD code = 1;
+    RunHidden(L"\"" + adb + L"\" shell pidof fr.justpita.phonecam", &out, &code);
+    if (code == 0 && !out.empty()) return false; // déjà lancée
+    out.clear();
+    RunHidden(L"\"" + adb + L"\" shell am start -n fr.justpita.phonecam/.MainActivity", &out, &code);
+    return code == 0;
+}
+
 bool AdbForward(std::string* message) {
     std::wstring adb = FindAdb();
     if (adb.empty()) {

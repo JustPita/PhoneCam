@@ -19,6 +19,7 @@
 #include "install.h"
 #include "net.h"
 #include "playout.h"
+#include "settings.h"
 #include "vcam.h"
 
 #pragma comment(linker, "/subsystem:windows")
@@ -112,8 +113,10 @@ enum : UINT {
     WM_APP_STATUS,
     WM_APP_TRAY,
     WM_APP_SHOW, // envoyé par une 2e instance : réafficher la fenêtre
+    WM_APP_CONNECTED,
+    WM_APP_CONNECT_FAILED,
 };
-enum : UINT { IDM_OPEN = 200, IDM_CONNECT, IDM_QUIT };
+enum : UINT { IDM_OPEN = 200, IDM_CONNECT, IDM_QUIT, IDM_AUTOSTART };
 enum : int {
     ID_SOURCE = 100,
     ID_MANUAL,
@@ -140,6 +143,12 @@ struct App {
 
     PhoneConnection conn;
     Discovery discovery;
+    std::thread connectThread;
+    std::atomic<bool> connecting{false};
+    bool autoConnect = true; // faux après « Déconnecter » jusqu'au prochain « Connecter »
+    bool helloReceived = false;
+    ULONGLONG lastAttempt = 0;
+    bool startHidden = false;
     VirtualCamera vcam;
     std::wstring vcamError;
 
@@ -474,53 +483,116 @@ static void Disconnect() {
     EnableWindow(g.manual, TRUE);
 }
 
-static void Connect() {
+// ---------------------------------------------------------------------------
+// Connexion (en arrière-plan, automatique)
+// ---------------------------------------------------------------------------
+struct Target {
+    bool usb = false;
     std::string host;
     uint16_t port = PHONECAM_PORT;
-    std::wstring manual = WindowText(g.manual);
-    if (!manual.empty()) {
-        host = U(manual);
-        auto c = host.find(':');
-        if (c != std::string::npos) {
-            port = uint16_t(atoi(host.c_str() + c + 1));
-            host.resize(c);
+};
+
+static Target ParseHost(const std::string& text) {
+    Target t;
+    t.host = text;
+    auto c = t.host.find(':');
+    if (c != std::string::npos) {
+        t.port = uint16_t(atoi(t.host.c_str() + c + 1));
+        t.host.resize(c);
+    }
+    return t;
+}
+
+// Fil de connexion : essaie les cibles dans l'ordre jusqu'à la première qui répond.
+static void ConnectWorker(std::vector<Target> targets, bool quiet) {
+    std::string lastError;
+    for (auto& t : targets) {
+        std::string host = t.host;
+        if (t.usb) {
+            std::string msg;
+            if (!AdbForward(&msg)) {
+                // Pas de téléphone en USB : normal en mode automatique, on n'en parle que sur demande.
+                if (!quiet || msg.find("autoris") != std::string::npos) lastError = msg;
+                continue;
+            }
+            // Téléphone branché : on ouvre l'application PhoneCam dessus si besoin.
+            if (AdbEnsureApp()) Sleep(2500);
+            host = "127.0.0.1";
         }
+        // Lissage par défaut : aucun en USB (pas de gigue), automatique en Wi-Fi.
+        g.playout.SetDelayMs(t.usb ? 0 : -1);
+        std::string err;
+        if (g.conn.Connect(host, t.port, MakeCallbacks(), &err)) {
+            PostMessageW(g.wnd, WM_APP_CONNECTED, t.usb ? 1 : 0, reinterpret_cast<LPARAM>(new std::string(
+                                                                      t.usb ? "" : host + ":" + std::to_string(t.port))));
+            return;
+        }
+        if (t.usb && err.find("refusée") != std::string::npos)
+            err = "USB : le téléphone ne répond pas. Ouvrez l'application PhoneCam sur le téléphone.";
+        if (!quiet || t.usb) lastError = err;
+    }
+    PostMessageW(g.wnd, WM_APP_CONNECT_FAILED, quiet ? 1 : 0, reinterpret_cast<LPARAM>(new std::string(lastError)));
+}
+
+static void StartConnect(std::vector<Target> targets, bool quiet) {
+    if (g.connecting || g.conn.Connected() || targets.empty()) return;
+    if (g.connectThread.joinable()) g.connectThread.join();
+    g.connecting = true;
+    g.helloReceived = false;
+    g.lastAttempt = GetTickCount64();
+    if (!quiet) SetStatus(L"Connexion…");
+    g.connectThread = std::thread(ConnectWorker, std::move(targets), quiet);
+}
+
+// Bouton « Connecter » : la source choisie, ou l'IP saisie.
+static void ConnectChosen() {
+    std::wstring manual = WindowText(g.manual);
+    std::vector<Target> targets;
+    if (!manual.empty()) {
+        targets.push_back(ParseHost(U(manual)));
     } else {
         int i = int(SendMessageW(g.source, CB_GETCURSEL, 0, 0));
         std::string id = (i >= 0 && size_t(i) < g.sourceIds.size()) ? g.sourceIds[size_t(i)] : "usb";
         if (id == "usb") {
-            std::string msg;
-            SetStatus(L"USB : préparation d'adb…");
-            if (!AdbForward(&msg)) {
-                SetStatus(W(msg));
-                return;
-            }
-            host = "127.0.0.1";
+            Target t;
+            t.usb = true;
+            targets.push_back(t);
         } else {
-            auto c = id.find(':');
-            host = id.substr(0, c);
-            port = uint16_t(atoi(id.c_str() + c + 1));
+            targets.push_back(ParseHost(id));
         }
     }
-    SetStatus(L"Connexion à " + W(host) + L"…");
-    HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
-    std::string err;
-    bool ok = g.conn.Connect(host, port, MakeCallbacks(), &err);
-    SetCursor(old);
-    if (!ok) {
-        if (host == "127.0.0.1" && err.find("refusée") != std::string::npos)
-            err = "USB : le téléphone ne répond pas. L'application PhoneCam est-elle ouverte sur le téléphone ?";
-        SetStatus(W(err));
-        return;
+    g.autoConnect = true;
+    StartConnect(targets, false);
+}
+
+// Toutes les quelques secondes tant qu'on n'est pas connecté : USB, puis téléphones vus en Wi-Fi,
+// puis le dernier téléphone Wi-Fi utilisé (utile quand il est sur un autre réseau, sans découverte).
+static void AutoConnectTick() {
+    if (!g.autoConnect || g.connecting || g.conn.Connected()) return;
+    if (GetTickCount64() - g.lastAttempt < 4000) return;
+    std::vector<Target> targets;
+    std::wstring manual = WindowText(g.manual);
+    if (!manual.empty()) {
+        targets.push_back(ParseHost(U(manual)));
+    } else {
+        Target usb;
+        usb.usb = true;
+        targets.push_back(usb);
+        std::string last = U(settings::GetString(L"LastHost"));
+        for (auto& p : g.discovery.List()) {
+            Target t;
+            t.host = p.address;
+            t.port = p.port;
+            targets.push_back(t);
+        }
+        if (!last.empty()) {
+            Target t = ParseHost(last);
+            bool already = false;
+            for (auto& x : targets) already |= (!x.usb && x.host == t.host);
+            if (!already) targets.push_back(t);
+        }
     }
-    // Lissage par défaut : aucun en USB (pas de gigue), automatique en Wi-Fi.
-    const bool usb = host == "127.0.0.1";
-    SendMessageW(g.smooth, CB_SETCURSEL, usb ? 0 : 1, 0);
-    g.playout.SetDelayMs(usb ? 0 : -1);
-    SetWindowTextW(g.connect, L"Déconnecter");
-    EnableWindow(g.source, FALSE);
-    EnableWindow(g.manual, FALSE);
-    SetStatus(L"Connecté, lecture des capacités du téléphone…");
+    StartConnect(targets, true);
 }
 
 static void EnsureVirtualCamera() {
@@ -584,6 +656,9 @@ static void TrayMenu() {
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_CONNECT, g.conn.Connected() ? L"Déconnecter le téléphone" : L"Connecter le téléphone");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING | (settings::AutoStartEnabled() ? MF_CHECKED : 0), IDM_AUTOSTART,
+                L"Démarrer avec Windows");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_QUIT, L"Quitter");
     SetMenuDefaultItem(m, IDM_OPEN, FALSE);
     POINT pt;
@@ -628,7 +703,10 @@ static void UpdateStats() {
         if (!g.decoderError.empty()) os << L"\r\n⚠ " << W(g.decoderError);
         if (!g.phoneMessage.empty()) os << L"\r\n⚠ Téléphone : " << g.phoneMessage;
     } else {
-        os << L"Non connecté. Choisissez le téléphone (Wi-Fi détecté ou USB) puis « Connecter ».";
+        if (g.autoConnect)
+            os << L"Recherche du téléphone… Branchez-le en USB ou ouvrez PhoneCam dessus (même Wi-Fi).";
+        else
+            os << L"Déconnecté. Cliquez sur « Connecter » pour reprendre.";
         if (!g.phoneMessage.empty()) os << L"\r\n" << g.phoneMessage;
     }
     SetStatus(os.str());
@@ -777,10 +855,23 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
         TrayAdd();
         g.discovery.Start();
+
+        // Réglages mémorisés
+        g.optMirror = settings::GetDword(L"Mirror", 0) != 0;
+        g.optRotate = settings::GetDword(L"Rotate", 0) != 0;
+        SendMessageW(g.mirror, BM_SETCHECK, g.optMirror ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(g.rotate, BM_SETCHECK, g.optRotate ? BST_CHECKED : BST_UNCHECKED, 0);
+        // Démarrage avec Windows activé par défaut la première fois (version installée uniquement).
+        if (settings::GetDword(L"AutoStartInit", 0) == 0 &&
+            _wcsicmp(installer::SelfPath().c_str(), installer::InstalledExe().c_str()) == 0) {
+            settings::SetAutoStart(true, installer::SelfPath());
+            settings::SetDword(L"AutoStartInit", 1);
+        }
         RefreshSources();
         SetTimer(wnd, ID_TIMER_STATS, 1000, nullptr);
         SetTimer(wnd, ID_TIMER_DISCOVERY, 1500, nullptr);
         EnsureVirtualCamera();
+        Layout(wnd); // nécessaire si la fenêtre démarre cachée
         UpdateStats();
         return 0;
     }
@@ -827,7 +918,10 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
     case WM_TIMER:
         if (wp == ID_TIMER_STATS) UpdateStats();
-        if (wp == ID_TIMER_DISCOVERY && !g.conn.Connected()) RefreshSources();
+        if (wp == ID_TIMER_DISCOVERY && !g.conn.Connected()) {
+            RefreshSources();
+            AutoConnectTick();
+        }
         return 0;
     case WM_COMMAND: {
         int id = LOWORD(wp), code = HIWORD(wp);
@@ -838,9 +932,15 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             PostMessageW(wnd, WM_CLOSE, 0, 0);
         } else if (id == ID_CONNECT || id == IDM_CONNECT) {
             g.phoneMessage.clear();
-            if (g.conn.Connected()) Disconnect();
-            else Connect();
+            if (g.conn.Connected()) {
+                g.autoConnect = false; // l'utilisateur a choisi de couper : pas de reconnexion automatique
+                Disconnect();
+            } else {
+                ConnectChosen();
+            }
             UpdateStats();
+        } else if (id == IDM_AUTOSTART) {
+            settings::SetAutoStart(!settings::AutoStartEnabled(), installer::SelfPath());
         } else if (id == IDOK) {
             // Entrée : valide le débit saisi.
             if (GetFocus() == g.bitrate && g.conn.Connected()) SendStart();
@@ -860,8 +960,10 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             lastBitrate = now;
         } else if (id == ID_MIRROR) {
             g.optMirror = SendMessageW(g.mirror, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            settings::SetDword(L"Mirror", g.optMirror ? 1 : 0);
         } else if (id == ID_ROTATE) {
             g.optRotate = SendMessageW(g.rotate, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            settings::SetDword(L"Rotate", g.optRotate ? 1 : 0);
         } else if (id == ID_SMOOTH && code == CBN_SELCHANGE) {
             static const int delays[] = {0, -1, 50, 100, 150, 250};
             int i = int(SendMessageW(g.smooth, CB_GETCURSEL, 0, 0));
@@ -869,8 +971,29 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
+    case WM_APP_CONNECTED: {
+        std::unique_ptr<std::string> host(reinterpret_cast<std::string*>(lp));
+        g.connecting = false;
+        const bool usb = wp != 0;
+        if (!usb && !host->empty()) settings::SetString(L"LastHost", W(*host)); // pour se reconnecter plus tard
+        SendMessageW(g.smooth, CB_SETCURSEL, usb ? 0 : 1, 0);
+        SetWindowTextW(g.connect, L"Déconnecter");
+        EnableWindow(g.source, FALSE);
+        EnableWindow(g.manual, FALSE);
+        g.phoneMessage.clear();
+        UpdateStats();
+        return 0;
+    }
+    case WM_APP_CONNECT_FAILED: {
+        std::unique_ptr<std::string> err(reinterpret_cast<std::string*>(lp));
+        g.connecting = false;
+        g.phoneMessage = W(*err);
+        UpdateStats();
+        return 0;
+    }
     case WM_APP_HELLO: {
         std::unique_ptr<std::string> t(reinterpret_cast<std::string*>(lp));
+        g.helloReceived = true;
         g.caps = PhoneCaps::Parse(*t);
         FillCameras();
         FillCodecs();
@@ -909,7 +1032,10 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_APP_CLOSED: {
         std::unique_ptr<std::string> t(reinterpret_cast<std::string*>(lp));
         Disconnect();
-        g.phoneMessage = W(*t);
+        // Reconnexion automatique dans quelques secondes (téléphone verrouillé, Wi-Fi coupé…).
+        g.lastAttempt = GetTickCount64();
+        g.phoneMessage = g.helloReceived ? W(*t) + L" — reconnexion automatique…"
+                                         : L"Le téléphone a coupé la connexion : ouvrez l'application PhoneCam dessus.";
         UpdateStats();
         InvalidateRect(wnd, &g.previewRect, FALSE);
         return 0;
@@ -923,6 +1049,8 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g.tray.hIcon) DestroyIcon(g.tray.hIcon);
         KillTimer(wnd, ID_TIMER_STATS);
         KillTimer(wnd, ID_TIMER_DISCOVERY);
+        g.autoConnect = false;
+        if (g.connectThread.joinable()) g.connectThread.join();
         g.conn.Disconnect();
         g.playout.Stop();
         g.discovery.Stop();
@@ -951,6 +1079,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show) {
     std::wstring args = cmdLine ? cmdLine : L"";
     if (args.find(L"--install") != std::wstring::npos) return installer::Install();
     if (args.find(L"--uninstall") != std::wstring::npos) return installer::Uninstall();
+    // Lancé au démarrage de Windows : directement dans la zone de notification.
+    g.startHidden = args.find(L"--tray") != std::wstring::npos;
 
     // Premier lancement (ou nouvelle version) : installation de la caméra virtuelle.
     if (installer::Needed()) {
@@ -1008,8 +1138,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show) {
     float scale = GetDpiForSystem() / 96.0f;
     HWND wnd = CreateWindowExW(0, wc.lpszClassName, L"PhoneCam", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                int(1040 * scale), int(760 * scale), nullptr, nullptr, inst, nullptr);
-    ShowWindow(wnd, show);
-    UpdateWindow(wnd);
+    if (!g.startHidden) {
+        ShowWindow(wnd, show);
+        UpdateWindow(wnd);
+    }
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {

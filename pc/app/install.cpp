@@ -245,6 +245,9 @@ int Uninstall() {
     FirewallRule(false, L"");
     DeleteFileW(ShortcutPath().c_str());
     RegDeleteTreeW(HKEY_LOCAL_MACHINE, kUninstallKey);
+    // Lancement au démarrage et réglages de l'utilisateur (UAC : même compte, donc même HKCU).
+    RegDeleteKeyValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", L"PhoneCam");
+    RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\PhoneCam");
     std::wstring data = PHONECAM_FORMAT_DIR;
     DeleteFileW(PHONECAM_FORMAT_FILE);
     RemoveDirectoryW(data.c_str());
