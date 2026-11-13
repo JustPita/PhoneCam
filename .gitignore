@@ -1,0 +1,20 @@
+# Android
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml
+*.apk
+*.keystore
+
+# PC
+pc/build/
+pc/out/
+.vs/
+*.user
+
+# Divers
+.DS_Store
+Thumbs.db

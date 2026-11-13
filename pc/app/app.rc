@@ -1,0 +1,7 @@
+#include <winres.h>
+
+1 RT_MANIFEST "app.manifest"
+1 ICON "phonecam.ico"
+
+// DLL de la caméra virtuelle, extraite et enregistrée par « PhoneCam.exe --install ».
+2 RCDATA "PhoneCamSource.dll"
