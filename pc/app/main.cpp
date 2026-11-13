@@ -123,7 +123,6 @@ enum : int {
     ID_FPS,
     ID_CODEC,
     ID_BITRATE,
-    ID_APPLY,
     ID_MIRROR,
     ID_ROTATE,
     ID_STATUS,
@@ -135,7 +134,7 @@ enum : int {
 struct App {
     HWND wnd = nullptr;
     HFONT font = nullptr;
-    HWND source, manual, connect, camera, res, fps, codec, bitrate, apply, mirror, rotate, smooth, status;
+    HWND source, manual, connect, camera, res, fps, codec, bitrate, mirror, rotate, smooth, status;
     float scale = 1.0f;
     RECT previewRect{};
 
@@ -351,8 +350,17 @@ static std::string SelectedCamera() {
 }
 static bool SelectedSize(int* w, int* h) { return swscanf_s(ComboText(g.res).c_str(), L"%d×%d", w, h) == 2; }
 
+// Resélectionne l'entrée qui commence par « previous » si elle existe encore, sinon la première.
+static void SelectOrFirst(HWND combo, const std::wstring& previous) {
+    LRESULT i = previous.empty() ? CB_ERR
+                                 : SendMessageW(combo, CB_FINDSTRING, WPARAM(-1), reinterpret_cast<LPARAM>(previous.c_str()));
+    SendMessageW(combo, CB_SETCURSEL, i == CB_ERR ? 0 : i, 0);
+}
+
 static void FillFps() {
     int w = 0, h = 0;
+    std::wstring previous = ComboText(g.fps);
+    if (auto sp = previous.find(L' '); sp != std::wstring::npos) previous.resize(sp + 1); // « 30 »
     SendMessageW(g.fps, CB_RESETCONTENT, 0, 0);
     if (!SelectedSize(&w, &h)) return;
     std::string cam = SelectedCamera(), codec = SelectedCodec();
@@ -377,10 +385,11 @@ static void FillFps() {
                 label += L" (haute vitesse)";
         SendMessageW(g.fps, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
     }
-    SendMessageW(g.fps, CB_SETCURSEL, 0, 0); // le plus élevé
+    SelectOrFirst(g.fps, previous); // sinon le plus élevé
 }
 
 static void FillResolutions() {
+    const std::wstring previous = ComboText(g.res);
     SendMessageW(g.res, CB_RESETCONTENT, 0, 0);
     std::string cam = SelectedCamera(), codec = SelectedCodec();
     std::vector<std::pair<int, int>> sizes;
@@ -395,7 +404,7 @@ static void FillResolutions() {
         std::wstring label = std::to_wstring(w) + L"×" + std::to_wstring(h);
         SendMessageW(g.res, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
     }
-    SendMessageW(g.res, CB_SETCURSEL, 0, 0); // la plus grande
+    SelectOrFirst(g.res, previous); // sinon la plus grande
     FillFps();
 }
 
@@ -412,7 +421,7 @@ static void FillCameras() {
 }
 
 static void EnableStreamControls(bool on) {
-    for (HWND h : {g.camera, g.res, g.fps, g.codec, g.bitrate, g.apply}) EnableWindow(h, on);
+    for (HWND h : {g.camera, g.res, g.fps, g.codec, g.bitrate}) EnableWindow(h, on);
 }
 
 static void RefreshSources() {
@@ -677,7 +686,6 @@ static void Layout(HWND wnd) {
     place(g.codec, S(120), S(200));
     place(g_labels[2].first, S(50));
     place(g.bitrate, S(50));
-    place(g.apply, S(90));
     // Ligne 3
     x = m;
     y += rowH + gap;
@@ -742,7 +750,7 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_labels.push_back({MakeCtl(wnd, L"STATIC", L"ou IP :", SS_CENTERIMAGE | SS_RIGHT, 0), {}});
         g.manual = MakeCtl(wnd, L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, ID_MANUAL);
         SendMessageW(g.manual, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"192.168.x.x"));
-        g.connect = MakeCtl(wnd, L"BUTTON", L"Connecter", BS_DEFPUSHBUTTON | WS_TABSTOP, ID_CONNECT);
+        g.connect = MakeCtl(wnd, L"BUTTON", L"Connecter", WS_TABSTOP, ID_CONNECT);
 
         g.camera = MakeCtl(wnd, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, ID_CAMERA);
         g.res = MakeCtl(wnd, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, ID_RES);
@@ -750,7 +758,6 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         g.codec = MakeCtl(wnd, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP, ID_CODEC);
         g_labels.push_back({MakeCtl(wnd, L"STATIC", L"Mb/s :", SS_CENTERIMAGE | SS_RIGHT, 0), {}});
         g.bitrate = MakeCtl(wnd, L"EDIT", L"0", ES_NUMBER | WS_TABSTOP, ID_BITRATE);
-        g.apply = MakeCtl(wnd, L"BUTTON", L"Appliquer", WS_TABSTOP, ID_APPLY);
 
         g.mirror = MakeCtl(wnd, L"BUTTON", L"Miroir", BS_AUTOCHECKBOX | WS_TABSTOP, ID_MIRROR);
         g.rotate = MakeCtl(wnd, L"BUTTON", L"Retourner (180°)", BS_AUTOCHECKBOX | WS_TABSTOP, ID_ROTATE);
@@ -834,12 +841,23 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g.conn.Connected()) Disconnect();
             else Connect();
             UpdateStats();
-        } else if (id == ID_APPLY) {
-            SendStart();
+        } else if (id == IDOK) {
+            // Entrée : valide le débit saisi.
+            if (GetFocus() == g.bitrate && g.conn.Connected()) SendStart();
         } else if ((id == ID_CAMERA || id == ID_CODEC) && code == CBN_SELCHANGE) {
+            // Chaque changement s'applique tout de suite, en gardant la taille et les i/s si possible.
             FillResolutions();
+            SendStart();
         } else if (id == ID_RES && code == CBN_SELCHANGE) {
             FillFps();
+            SendStart();
+        } else if (id == ID_FPS && code == CBN_SELCHANGE) {
+            SendStart();
+        } else if (id == ID_BITRATE && code == EN_KILLFOCUS) {
+            static std::wstring lastBitrate = L"0";
+            std::wstring now = WindowText(g.bitrate);
+            if (now != lastBitrate && g.conn.Connected()) SendStart();
+            lastBitrate = now;
         } else if (id == ID_MIRROR) {
             g.optMirror = SendMessageW(g.mirror, BM_GETCHECK, 0, 0) == BST_CHECKED;
         } else if (id == ID_ROTATE) {
