@@ -20,6 +20,7 @@
 #include "net.h"
 #include "playout.h"
 #include "settings.h"
+#include "theme.h"
 #include "vcam.h"
 
 #pragma comment(linker, "/subsystem:windows")
@@ -130,16 +131,33 @@ enum : int {
     ID_ROTATE,
     ID_STATUS,
     ID_SMOOTH,
+    ID_PRESET,
+    ID_ADVANCED,
+    ID_MIRROR_LABEL,
+    ID_ROTATE_LABEL,
     ID_TIMER_STATS = 1,
     ID_TIMER_DISCOVERY = 2,
 };
 
+// Préréglages de qualité (index dans la liste « Qualité »)
+enum Preset { P_BEST = 0, P_SMOOTH, P_BALANCED, P_ECO, P_CUSTOM };
+
 struct App {
     HWND wnd = nullptr;
-    HFONT font = nullptr;
-    HWND source, manual, connect, camera, res, fps, codec, bitrate, mirror, rotate, smooth, status;
+    HFONT font = nullptr, headFont = nullptr;
+    Theme theme;
+    // Réglages simples
+    HWND connect, camera, preset, mirror, mirrorLabel, advancedBtn;
+    HWND lblCamera, lblPreset;
+    // Volet avancé
+    HWND source, manual, res, fps, codec, bitrate, rotate, rotateLabel, smooth, status;
+    HWND lblSource, lblIp, lblRes, lblBitrate, lblSmooth;
+    bool advanced = false;
     float scale = 1.0f;
-    RECT previewRect{};
+    RECT previewRect{}, headerRect{}, footerRect{};
+    std::wstring headline, footer;
+    COLORREF headDot = 0;
+    bool footerWarn = false;
 
     PhoneConnection conn;
     Discovery discovery;
@@ -147,6 +165,7 @@ struct App {
     std::atomic<bool> connecting{false};
     bool autoConnect = true; // faux après « Déconnecter » jusqu'au prochain « Connecter »
     bool helloReceived = false;
+    bool viaUsb = false;
     ULONGLONG lastAttempt = 0;
     bool startHidden = false;
     VirtualCamera vcam;
@@ -417,20 +436,126 @@ static void FillResolutions() {
     FillFps();
 }
 
+// Noms simples : « Arrière », « Avant », « Arrière 2 »…
 static void FillCameras() {
     SendMessageW(g.camera, CB_RESETCONTENT, 0, 0);
-    int sel = 0, i = 0;
+    const std::string wanted = U(settings::GetString(L"CameraFacing"));
+    std::map<std::string, int> seen;
+    int sel = -1, i = 0;
     for (auto& c : g.caps.cams) {
-        std::wstring label = L"Caméra " + W(c.id) + L" (" + FacingName(c.facing) + L")";
+        int n = ++seen[c.facing];
+        std::wstring label = c.facing == "back" ? L"Arrière" : c.facing == "front" ? L"Avant" : L"Externe";
+        if (n > 1) label += L" " + std::to_wstring(n);
         SendMessageW(g.camera, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
-        if (c.facing == "back" && sel == 0 && i != 0 && g.caps.cams[0].facing != "back") sel = i;
+        if (sel < 0 && c.facing == (wanted.empty() ? "back" : wanted)) sel = i;
         ++i;
     }
-    SendMessageW(g.camera, CB_SETCURSEL, sel, 0);
+    SendMessageW(g.camera, CB_SETCURSEL, sel < 0 ? 0 : sel, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Préréglages : calculés à partir des modes réels de la caméra choisie
+// ---------------------------------------------------------------------------
+static bool Is169(int w, int h) { return w * 9 == h * 16; }
+
+// Plus grand fps disponible pour une taille (normal ou haute vitesse), et la liste des fps exacts.
+static int MaxFps(const std::string& cam, const std::string& codec, int w, int h, bool* hasExact60) {
+    int best = 0;
+    bool exact60 = false;
+    for (auto& m : g.caps.modes) {
+        if (m.camera != cam || m.codec != codec || m.width != w || m.height != h) continue;
+        best = (std::max)(best, m.fps);
+        if (!m.highSpeed ? m.fps >= 60 : m.fps == 60) exact60 = true;
+    }
+    if (hasExact60) *hasExact60 = exact60;
+    return best;
+}
+
+static bool PickPreset(int preset, int* outW, int* outH, int* outFps) {
+    const std::string cam = SelectedCamera(), codec = SelectedCodec();
+    std::vector<std::pair<int, int>> sizes;
+    bool any169 = false;
+    for (auto& m : g.caps.modes) {
+        if (m.camera != cam || m.codec != codec) continue;
+        if (uint64_t(m.width) * m.height > PHONECAM_MAX_PIXELS) continue;
+        auto p = std::make_pair(m.width, m.height);
+        if (std::find(sizes.begin(), sizes.end(), p) == sizes.end()) sizes.push_back(p);
+        any169 |= Is169(m.width, m.height);
+    }
+    if (sizes.empty()) return false;
+    // Une webcam est en 16:9 : on ne garde que ces tailles quand il y en a.
+    if (any169) sizes.erase(std::remove_if(sizes.begin(), sizes.end(), [](auto& s) { return !Is169(s.first, s.second); }),
+                            sizes.end());
+    std::sort(sizes.begin(), sizes.end(), [](auto& a, auto& b) { return a.first * a.second > b.first * b.second; });
+
+    auto choose = [&](int w, int h, int fps) {
+        *outW = w;
+        *outH = h;
+        *outFps = fps;
+        return true;
+    };
+    switch (preset) {
+    case P_BEST: { // la plus grande taille, à son fps maximal en session normale (≤ 60)
+        auto [w, h] = sizes.front();
+        int fps = 0;
+        for (auto& m : g.caps.modes)
+            if (m.camera == cam && m.codec == codec && m.width == w && m.height == h && !m.highSpeed) fps = (std::max)(fps, m.fps);
+        return choose(w, h, fps ? (std::min)(fps, 60) : MaxFps(cam, codec, w, h, nullptr));
+    }
+    case P_SMOOTH: { // 60 i/s à la plus grande taille possible ; sinon la plus petite fréquence ≥ 50 ; sinon le maximum
+        for (auto& [w, h] : sizes) {
+            bool has60 = false;
+            MaxFps(cam, codec, w, h, &has60);
+            if (has60 && h >= 720) return choose(w, h, 60);
+        }
+        for (auto& [w, h] : sizes) {
+            if (h < 720) continue;
+            int lowest = 0;
+            for (auto& m : g.caps.modes) {
+                if (m.camera != cam || m.codec != codec || m.width != w || m.height != h) continue;
+                int f = m.highSpeed ? m.fps : (m.fps >= 50 ? 50 : 0); // en mode normal, 50 est atteignable si max ≥ 50
+                if (f >= 50 && (lowest == 0 || f < lowest)) lowest = m.highSpeed ? m.fps : (std::min)(m.fps, 60);
+            }
+            if (lowest) return choose(w, h, lowest);
+        }
+        int bw = sizes.front().first, bh = sizes.front().second, bf = 0;
+        for (auto& [w, h] : sizes) {
+            int f = MaxFps(cam, codec, w, h, nullptr);
+            if (f > bf) bw = w, bh = h, bf = f;
+        }
+        return choose(bw, bh, bf);
+    }
+    case P_BALANCED:
+    case P_ECO: { // 1080p30 / 720p30, ou la taille la plus proche en dessous
+        const int target = preset == P_BALANCED ? 1080 : 720;
+        for (auto& [w, h] : sizes)
+            if (h <= target) return choose(w, h, (std::min)(30, MaxFps(cam, codec, w, h, nullptr)));
+        auto [w, h] = sizes.back();
+        return choose(w, h, (std::min)(30, MaxFps(cam, codec, w, h, nullptr)));
+    }
+    }
+    return false;
+}
+
+static void SelectExact(HWND combo, const std::wstring& prefix) {
+    LRESULT i = SendMessageW(combo, CB_FINDSTRING, WPARAM(-1), reinterpret_cast<LPARAM>(prefix.c_str()));
+    if (i != CB_ERR) SendMessageW(combo, CB_SETCURSEL, i, 0);
+}
+
+// Règle résolution et i/s selon le préréglage choisi (sans envoyer au téléphone).
+static void ApplyPresetToControls() {
+    int p = int(SendMessageW(g.preset, CB_GETCURSEL, 0, 0));
+    int w, h, fps;
+    if (p < 0 || p == P_CUSTOM || !PickPreset(p, &w, &h, &fps)) return;
+    FillResolutions();
+    SelectExact(g.res, std::to_wstring(w) + L"×" + std::to_wstring(h));
+    FillFps();
+    SelectExact(g.fps, std::to_wstring(fps) + L" ");
+    SetWindowTextW(g.bitrate, L"0");
 }
 
 static void EnableStreamControls(bool on) {
-    for (HWND h : {g.camera, g.res, g.fps, g.codec, g.bitrate}) EnableWindow(h, on);
+    for (HWND h : {g.camera, g.preset, g.res, g.fps, g.codec, g.bitrate}) EnableWindow(h, on);
 }
 
 static void RefreshSources() {
@@ -469,7 +594,6 @@ static void SendStart() {
     os << "camera=" << SelectedCamera() << " width=" << w << " height=" << h << " fps=" << fps
        << " codec=" << SelectedCodec() << " bitrate=" << int64_t(mbps * 1e6);
     g.conn.Send('S', os.str());
-    SetStatus(L"Démarrage de la capture…");
 }
 
 static void Disconnect() {
@@ -673,15 +797,47 @@ static void UpdateStats() {
     ULONGLONG now = GetTickCount64();
     double dt = g.lastStatTick ? (now - g.lastStatTick) / 1000.0 : 0;
     uint64_t bytes = g.conn.bytesReceived, frames = g.conn.framesReceived, dec = g.framesDecoded;
+
+    // --- Titre et pied de page (vue simple) ---
+    const bool connected = g.conn.Connected();
+    auto kvFmt = ParseKv(g.formatText);
+    if (connected) {
+        g.headDot = g.theme.ok;
+        g.headline = L"Connecté à " + W(g.caps.device.empty() ? "votre téléphone" : g.caps.device);
+        g.headline += g.viaUsb ? L" · USB" : L" · Wi-Fi";
+        if (!g.formatText.empty())
+            g.headline += L" · " + W(kvFmt["width"]) + L"×" + W(kvFmt["height"]) + L" · " + W(kvFmt["fps"]) + L" i/s";
+    } else if (g.connecting || g.autoConnect) {
+        g.headDot = g.theme.warn;
+        g.headline = L"Recherche du téléphone…";
+    } else {
+        g.headDot = g.theme.sub;
+        g.headline = L"Déconnecté";
+    }
+    g.footerWarn = true;
+    if (!g.vcamError.empty()) g.footer = g.vcamError;
+    else if (!g.decoderError.empty() && connected) g.footer = W(g.decoderError);
+    else if (!g.phoneMessage.empty()) g.footer = g.phoneMessage;
+    else {
+        g.footerWarn = false;
+        if (!connected)
+            g.footer = g.autoConnect ? L"Branchez le téléphone en USB, ou ouvrez PhoneCam dessus sur le même Wi-Fi."
+                                     : L"Cliquez sur « Connecter » pour reprendre.";
+        else if (g.consumer)
+            g.footer = L"La webcam « PhoneCam » est utilisée par une application.";
+        else
+            g.footer = L"La webcam « PhoneCam » est prête : choisissez-la dans Teams, Discord, OBS, Zoom…";
+    }
+    InvalidateRect(g.wnd, &g.headerRect, FALSE);
+    InvalidateRect(g.wnd, &g.footerRect, FALSE);
+
+    // --- Détails techniques (volet avancé) ---
     std::wostringstream os;
-    if (!g.vcamError.empty()) os << L"⚠ " << g.vcamError << L"\r\n";
-    else os << L"Caméra virtuelle « PhoneCam » : " << (g.vcam.Active() ? (g.consumer ? L"utilisée par une application" : L"prête") : L"inactive") << L"\r\n";
-    if (g.conn.Connected()) {
-        os << L"Téléphone : " << W(g.caps.device.empty() ? "?" : g.caps.device);
+    os << L"Caméra virtuelle : " << (g.vcam.Active() ? (g.consumer ? L"utilisée" : L"prête") : L"inactive");
+    if (connected) {
         if (!g.formatText.empty()) {
-            auto kv = ParseKv(g.formatText);
-            os << L" · " << W(kv["width"]) << L"×" << W(kv["height"]) << L" @ " << W(kv["fps"]) << L" i/s "
-               << (kv["codec"] == "hevc" ? L"HEVC" : L"H.264") << L" · décodage "
+            os << L" · " << W(kvFmt["width"]) << L"×" << W(kvFmt["height"]) << L" @ " << W(kvFmt["fps"]) << L" i/s "
+               << (kvFmt["codec"] == "hevc" ? L"HEVC" : L"H.264") << L" · décodage "
                << (g.decoder.Hardware() ? L"matériel" : L"logiciel");
         }
         os << L"\r\n";
@@ -700,14 +856,6 @@ static void UpdateStats() {
                 os << buf;
             }
         }
-        if (!g.decoderError.empty()) os << L"\r\n⚠ " << W(g.decoderError);
-        if (!g.phoneMessage.empty()) os << L"\r\n⚠ Téléphone : " << g.phoneMessage;
-    } else {
-        if (g.autoConnect)
-            os << L"Recherche du téléphone… Branchez-le en USB ou ouvrez PhoneCam dessus (même Wi-Fi).";
-        else
-            os << L"Déconnecté. Cliquez sur « Connecter » pour reprendre.";
-        if (!g.phoneMessage.empty()) os << L"\r\n" << g.phoneMessage;
     }
     SetStatus(os.str());
 
@@ -731,67 +879,150 @@ static void UpdateStats() {
 // Fenêtre
 // ---------------------------------------------------------------------------
 static HWND MakeCtl(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD style, int id) {
-    HWND h = CreateWindowExW(cls == std::wstring(L"EDIT") ? WS_EX_CLIENTEDGE : 0, cls, text,
-                             WS_CHILD | WS_VISIBLE | style, 0, 0, 10, 10, parent,
+    const std::wstring c = cls;
+    HWND h = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 10, 10, parent,
                              reinterpret_cast<HMENU>(INT_PTR(id)), GetModuleHandleW(nullptr), nullptr);
     SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
+    if (c == L"EDIT") g.theme.ApplyControl(h, Theme::Edit);
+    else if (c == WC_COMBOBOXW) g.theme.ApplyControl(h, Theme::Combo);
+    else if (c == L"BUTTON") g.theme.ApplyControl(h, (style & BS_AUTOCHECKBOX) == BS_AUTOCHECKBOX ? Theme::Check : Theme::Button);
     return h;
 }
+static HWND MakeLabel(HWND parent, const wchar_t* text, int id = 0, DWORD extra = 0) {
+    return MakeCtl(parent, L"STATIC", text, SS_CENTERIMAGE | extra | (id ? SS_NOTIFY : 0), id);
+}
 
-static std::vector<std::pair<HWND, RECT>> g_labels;
+// Applique le thème courant (clair/sombre) à toute la fenêtre.
+static void ApplyTheme() {
+    g.theme.Load();
+    g.theme.ApplyWindow(g.wnd);
+    for (HWND h : {g.camera, g.preset, g.source, g.res, g.fps, g.codec, g.smooth}) g.theme.ApplyControl(h, Theme::Combo);
+    for (HWND h : {g.manual, g.bitrate}) g.theme.ApplyControl(h, Theme::Edit);
+    for (HWND h : {g.connect, g.advancedBtn}) g.theme.ApplyControl(h, Theme::Button);
+    for (HWND h : {g.mirror, g.rotate}) g.theme.ApplyControl(h, Theme::Check);
+    InvalidateRect(g.wnd, nullptr, TRUE);
+}
 
 static void Layout(HWND wnd) {
     RECT rc;
     GetClientRect(wnd, &rc);
-    const int m = S(12), rowH = S(26), gap = S(8);
-    int x = m, y = m;
+    const int m = S(20), rowH = S(30), gap = S(10);
+    const int right = rc.right - m;
+
+    // En-tête : état (dessiné) + bouton Connecter à droite
+    g.headerRect = {m, m, right - S(150), m + S(36)};
+    MoveWindow(g.connect, right - S(140), m + S(2), S(140), S(32), TRUE);
+
+    // Réglages simples
+    int y = m + S(52), x = m;
     auto place = [&](HWND h, int w, int height = 0) {
         MoveWindow(h, x, y, w, height ? height : rowH, TRUE);
         x += w + gap;
     };
-    // Ligne 1
-    place(g_labels[0].first, S(70));
-    place(g.source, S(300), S(300));
-    place(g_labels[1].first, S(60));
-    place(g.manual, S(150));
-    place(g.connect, S(110));
-    // Ligne 2
-    x = m;
+    place(g.lblCamera, S(58));
+    place(g.camera, S(130), S(300));
+    x += S(14);
+    place(g.lblPreset, S(58));
+    place(g.preset, S(190), S(300));
+    x += S(14);
+    place(g.mirror, S(20));
+    x -= gap - S(4);
+    place(g.mirrorLabel, S(60));
+    MoveWindow(g.advancedBtn, right - S(170), y, S(170), rowH, TRUE);
     y += rowH + gap;
-    place(g.camera, S(170), S(300));
-    place(g.res, S(130), S(400));
-    place(g.fps, S(170), S(300));
-    place(g.codec, S(120), S(200));
-    place(g_labels[2].first, S(50));
-    place(g.bitrate, S(50));
-    // Ligne 3
-    x = m;
-    y += rowH + gap;
-    place(g.mirror, S(110));
-    place(g.rotate, S(180));
-    place(g_labels[3].first, S(70));
-    place(g.smooth, S(190), S(200));
-    // Aperçu et état
-    y += rowH + gap;
-    const int statusH = S(96);
-    g.previewRect = {m, y, rc.right - m, rc.bottom - m - statusH - gap};
-    MoveWindow(g.status, m, rc.bottom - m - statusH, rc.right - 2 * m, statusH, TRUE);
+
+    // Volet avancé
+    HWND adv[] = {g.lblSource, g.source, g.lblIp,     g.manual,      g.lblRes,    g.res,   g.fps,   g.codec,
+                  g.lblBitrate, g.bitrate, g.rotate, g.rotateLabel, g.lblSmooth, g.smooth, g.status};
+    for (HWND h : adv) ShowWindow(h, g.advanced ? SW_SHOW : SW_HIDE);
+    if (g.advanced) {
+        y += S(4);
+        x = m;
+        place(g.lblSource, S(58));
+        place(g.source, S(280), S(300));
+        place(g.lblIp, S(52));
+        place(g.manual, S(150));
+        y += rowH + gap;
+        x = m;
+        place(g.lblRes, S(78));
+        place(g.res, S(130), S(400));
+        place(g.fps, S(190), S(300));
+        place(g.codec, S(130), S(200));
+        place(g.lblBitrate, S(48));
+        place(g.bitrate, S(56));
+        y += rowH + gap;
+        x = m;
+        place(g.rotate, S(20));
+        x -= gap - S(4);
+        place(g.rotateLabel, S(150));
+        place(g.lblSmooth, S(62));
+        place(g.smooth, S(210), S(200));
+        y += rowH + gap;
+        MoveWindow(g.status, m, y, right - m, S(56), TRUE);
+        y += S(56) + gap;
+    }
+
+    // Aperçu puis pied de page
+    const int footerH = S(28);
+    g.previewRect = {m, y + S(4), right, rc.bottom - m - footerH - gap};
+    g.footerRect = {m, rc.bottom - m - footerH, right, rc.bottom - m};
     InvalidateRect(wnd, nullptr, TRUE);
+}
+
+static void FillRoundRect(HDC dc, const RECT& r, COLORREF c, int radius) {
+    HBRUSH b = CreateSolidBrush(c);
+    HPEN p = CreatePen(PS_SOLID, 1, c);
+    HGDIOBJ ob = SelectObject(dc, b), op = SelectObject(dc, p);
+    RoundRect(dc, r.left, r.top, r.right, r.bottom, radius, radius);
+    SelectObject(dc, ob);
+    SelectObject(dc, op);
+    DeleteObject(b);
+    DeleteObject(p);
 }
 
 static void Paint(HWND wnd) {
     PAINTSTRUCT ps;
     HDC dc = BeginPaint(wnd, &ps);
+    SetBkMode(dc, TRANSPARENT);
+
+    // En-tête : pastille + état
+    RECT hr = g.headerRect;
+    FillRect(dc, &hr, g.theme.bgBrush);
+    const int dot = S(12);
+    RECT d = {hr.left, hr.top + (hr.bottom - hr.top - dot) / 2, hr.left + dot, hr.top + (hr.bottom - hr.top + dot) / 2};
+    FillRoundRect(dc, d, g.headDot, dot);
+    RECT tr = hr;
+    tr.left += dot + S(12);
+    HGDIOBJ of = SelectObject(dc, g.headFont);
+    SetTextColor(dc, g.theme.text);
+    DrawTextW(dc, g.headline.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    // Pied de page
+    RECT fr = g.footerRect;
+    FillRect(dc, &fr, g.theme.bgBrush);
+    SelectObject(dc, g.font);
+    SetTextColor(dc, g.footerWarn ? g.theme.warn : g.theme.sub);
+    DrawTextW(dc, g.footer.c_str(), -1, &fr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SelectObject(dc, of);
+
+    // Aperçu
     RECT r = g.previewRect;
-    HBRUSH bg = CreateSolidBrush(RGB(24, 26, 30));
+    HBRUSH bg = CreateSolidBrush(g.theme.dark ? RGB(18, 18, 18) : RGB(28, 30, 34));
     std::lock_guard<std::mutex> lk(g.previewLock);
-    if (g.previewW > 0 && g.conn.Connected()) {
-        int ox = r.left + ((r.right - r.left) - g.previewW) / 2, oy = r.top + ((r.bottom - r.top) - g.previewH) / 2;
-        // Fond autour de l'image
+    const int rw = r.right - r.left, rh = r.bottom - r.top;
+    if (g.previewW > 0 && g.conn.Connected() && rw > 0 && rh > 0) {
+        // L'image d'aperçu peut avoir été calculée pour une autre taille de fenêtre (plein écran puis retour) :
+        // on l'ajuste toujours à la zone, et on n'écrit jamais en dehors.
+        int dw = rw, dh = int(int64_t(rw) * g.previewH / g.previewW);
+        if (dh > rh) {
+            dh = rh;
+            dw = int(int64_t(rh) * g.previewW / g.previewH);
+        }
+        const int ox = r.left + (rw - dw) / 2, oy = r.top + (rh - dh) / 2;
         RECT bands[4] = {{r.left, r.top, r.right, oy},
-                         {r.left, oy + g.previewH, r.right, r.bottom},
-                         {r.left, oy, ox, oy + g.previewH},
-                         {ox + g.previewW, oy, r.right, oy + g.previewH}};
+                         {r.left, oy + dh, r.right, r.bottom},
+                         {r.left, oy, ox, oy + dh},
+                         {ox + dw, oy, r.right, oy + dh}};
         for (auto& b : bands) FillRect(dc, &b, bg);
         BITMAPINFO bi{};
         bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
@@ -800,8 +1031,17 @@ static void Paint(HWND wnd) {
         bi.bmiHeader.biPlanes = 1;
         bi.bmiHeader.biBitCount = 32;
         bi.bmiHeader.biCompression = BI_RGB;
-        SetDIBitsToDevice(dc, ox, oy, DWORD(g.previewW), DWORD(g.previewH), 0, 0, 0, UINT(g.previewH),
-                          g.preview.data(), &bi, DIB_RGB_COLORS);
+        SaveDC(dc);
+        IntersectClipRect(dc, r.left, r.top, r.right, r.bottom);
+        if (dw == g.previewW && dh == g.previewH) {
+            SetDIBitsToDevice(dc, ox, oy, DWORD(dw), DWORD(dh), 0, 0, 0, UINT(g.previewH), g.preview.data(), &bi,
+                              DIB_RGB_COLORS);
+        } else {
+            SetStretchBltMode(dc, HALFTONE);
+            StretchDIBits(dc, ox, oy, dw, dh, 0, 0, g.previewW, g.previewH, g.preview.data(), &bi, DIB_RGB_COLORS,
+                          SRCCOPY);
+        }
+        RestoreDC(dc, -1);
     } else {
         FillRect(dc, &r, bg);
         SetTextColor(dc, RGB(160, 165, 175));
@@ -822,24 +1062,43 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         NONCLIENTMETRICSW ncm{sizeof(ncm)};
         SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, GetDpiForWindow(wnd));
         g.font = CreateFontIndirectW(&ncm.lfMessageFont);
+        LOGFONTW head = ncm.lfMessageFont;
+        head.lfHeight = -MulDiv(15, int(GetDpiForWindow(wnd)), 72);
+        head.lfWeight = FW_SEMIBOLD;
+        wcscpy_s(head.lfFaceName, L"Segoe UI Variable Display");
+        g.headFont = CreateFontIndirectW(&head);
+        g.theme.Load();
+        g.theme.ApplyWindow(wnd);
 
-        g_labels.push_back({MakeCtl(wnd, L"STATIC", L"Téléphone :", SS_CENTERIMAGE, 0), {}});
-        g.source = MakeCtl(wnd, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, ID_SOURCE);
-        g_labels.push_back({MakeCtl(wnd, L"STATIC", L"ou IP :", SS_CENTERIMAGE | SS_RIGHT, 0), {}});
-        g.manual = MakeCtl(wnd, L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP, ID_MANUAL);
-        SendMessageW(g.manual, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"192.168.x.x"));
+        // Vue simple
         g.connect = MakeCtl(wnd, L"BUTTON", L"Connecter", WS_TABSTOP, ID_CONNECT);
-
+        g.lblCamera = MakeLabel(wnd, L"Caméra");
         g.camera = MakeCtl(wnd, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, ID_CAMERA);
+        g.lblPreset = MakeLabel(wnd, L"Qualité");
+        g.preset = MakeCtl(wnd, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP, ID_PRESET);
+        for (const wchar_t* s : {L"Meilleure qualité", L"Fluide (60 i/s ou plus)", L"Équilibré (1080p)", L"Économie (720p)", L"Personnalisé"})
+            SendMessageW(g.preset, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s));
+        SendMessageW(g.preset, CB_SETCURSEL, settings::GetDword(L"Preset", P_BEST), 0);
+        // Cases à cocher sans texte + libellé cliquable (le texte des cases ne suit pas le thème sombre).
+        g.mirror = MakeCtl(wnd, L"BUTTON", L"", BS_AUTOCHECKBOX | WS_TABSTOP, ID_MIRROR);
+        g.mirrorLabel = MakeLabel(wnd, L"Miroir", ID_MIRROR_LABEL);
+        g.advancedBtn = MakeCtl(wnd, L"BUTTON", L"Réglages avancés  ▾", WS_TABSTOP, ID_ADVANCED);
+
+        // Volet avancé
+        g.lblSource = MakeLabel(wnd, L"Source");
+        g.source = MakeCtl(wnd, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, ID_SOURCE);
+        g.lblIp = MakeLabel(wnd, L"ou IP", 0, SS_RIGHT);
+        g.manual = MakeCtl(wnd, L"EDIT", L"", ES_AUTOHSCROLL | WS_TABSTOP | WS_BORDER, ID_MANUAL);
+        SendMessageW(g.manual, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"192.168.x.x"));
+        g.lblRes = MakeLabel(wnd, L"Résolution");
         g.res = MakeCtl(wnd, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, ID_RES);
         g.fps = MakeCtl(wnd, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, ID_FPS);
         g.codec = MakeCtl(wnd, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP, ID_CODEC);
-        g_labels.push_back({MakeCtl(wnd, L"STATIC", L"Mb/s :", SS_CENTERIMAGE | SS_RIGHT, 0), {}});
-        g.bitrate = MakeCtl(wnd, L"EDIT", L"0", ES_NUMBER | WS_TABSTOP, ID_BITRATE);
-
-        g.mirror = MakeCtl(wnd, L"BUTTON", L"Miroir", BS_AUTOCHECKBOX | WS_TABSTOP, ID_MIRROR);
-        g.rotate = MakeCtl(wnd, L"BUTTON", L"Retourner (180°)", BS_AUTOCHECKBOX | WS_TABSTOP, ID_ROTATE);
-        g_labels.push_back({MakeCtl(wnd, L"STATIC", L"Lissage :", SS_CENTERIMAGE | SS_RIGHT, 0), {}});
+        g.lblBitrate = MakeLabel(wnd, L"Mb/s", 0, SS_RIGHT);
+        g.bitrate = MakeCtl(wnd, L"EDIT", L"0", ES_NUMBER | WS_TABSTOP | WS_BORDER, ID_BITRATE);
+        g.rotate = MakeCtl(wnd, L"BUTTON", L"", BS_AUTOCHECKBOX | WS_TABSTOP, ID_ROTATE);
+        g.rotateLabel = MakeLabel(wnd, L"Retourner (180°)", ID_ROTATE_LABEL);
+        g.lblSmooth = MakeLabel(wnd, L"Lissage", 0, SS_RIGHT);
         g.smooth = MakeCtl(wnd, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_TABSTOP, ID_SMOOTH);
         for (const wchar_t* s : {L"Aucun (latence minimale)", L"Auto (selon la gigue)", L"50 ms", L"100 ms", L"150 ms", L"250 ms"})
             SendMessageW(g.smooth, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s));
@@ -850,6 +1109,8 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             UpdatePreview(f);
         });
         g.status = MakeCtl(wnd, L"STATIC", L"", SS_LEFT, ID_STATUS);
+        g.advanced = settings::GetDword(L"Advanced", 0) != 0;
+        SetWindowTextW(g.advancedBtn, g.advanced ? L"Réglages avancés  ▴" : L"Réglages avancés  ▾");
 
         EnableStreamControls(false);
         g.taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
@@ -907,15 +1168,37 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_GETMINMAXINFO: {
         auto* mm = reinterpret_cast<MINMAXINFO*>(lp);
-        mm->ptMinTrackSize = {S(960), S(560)};
+        mm->ptMinTrackSize = {S(860), S(600)};
         return 0;
     }
     case WM_PAINT:
         Paint(wnd);
         return 0;
+    case WM_ERASEBKGND: {
+        RECT rc;
+        GetClientRect(wnd, &rc);
+        FillRect(reinterpret_cast<HDC>(wp), &rc, g.theme.bgBrush);
+        return 1;
+    }
     case WM_CTLCOLORSTATIC:
-        SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
-        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+    case WM_CTLCOLORBTN: {
+        HDC dc = reinterpret_cast<HDC>(wp);
+        SetBkMode(dc, TRANSPARENT);
+        SetBkColor(dc, g.theme.bg);
+        SetTextColor(dc, reinterpret_cast<HWND>(lp) == g.status ? g.theme.sub : g.theme.text);
+        return reinterpret_cast<LRESULT>(g.theme.bgBrush);
+    }
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX: {
+        HDC dc = reinterpret_cast<HDC>(wp);
+        SetTextColor(dc, g.theme.text);
+        SetBkColor(dc, g.theme.surface);
+        return reinterpret_cast<LRESULT>(g.theme.surfaceBrush);
+    }
+    case WM_SETTINGCHANGE:
+        // Passage clair/sombre dans les paramètres de Windows : on suit.
+        if (lp && wcscmp(reinterpret_cast<const wchar_t*>(lp), L"ImmersiveColorSet") == 0) ApplyTheme();
+        return 0;
     case WM_TIMER:
         if (wp == ID_TIMER_STATS) UpdateStats();
         if (wp == ID_TIMER_DISCOVERY && !g.conn.Connected()) {
@@ -944,24 +1227,43 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         } else if (id == IDOK) {
             // Entrée : valide le débit saisi.
             if (GetFocus() == g.bitrate && g.conn.Connected()) SendStart();
-        } else if ((id == ID_CAMERA || id == ID_CODEC) && code == CBN_SELCHANGE) {
-            // Chaque changement s'applique tout de suite, en gardant la taille et les i/s si possible.
+        } else if (id == ID_CAMERA && code == CBN_SELCHANGE) {
+            // Chaque changement s'applique tout de suite. Le préréglage est recalculé pour la nouvelle caméra.
+            int i = int(SendMessageW(g.camera, CB_GETCURSEL, 0, 0));
+            if (i >= 0 && size_t(i) < g.caps.cams.size()) settings::SetString(L"CameraFacing", W(g.caps.cams[size_t(i)].facing));
             FillResolutions();
+            ApplyPresetToControls();
             SendStart();
-        } else if (id == ID_RES && code == CBN_SELCHANGE) {
-            FillFps();
+        } else if (id == ID_PRESET && code == CBN_SELCHANGE) {
+            int p = int(SendMessageW(g.preset, CB_GETCURSEL, 0, 0));
+            settings::SetDword(L"Preset", DWORD(p));
+            ApplyPresetToControls();
             SendStart();
-        } else if (id == ID_FPS && code == CBN_SELCHANGE) {
+        } else if ((id == ID_CODEC || id == ID_RES || id == ID_FPS) && code == CBN_SELCHANGE) {
+            // Réglage manuel : le préréglage devient « Personnalisé ».
+            if (id == ID_CODEC) FillResolutions();
+            if (id == ID_RES) FillFps();
+            SendMessageW(g.preset, CB_SETCURSEL, P_CUSTOM, 0);
+            settings::SetDword(L"Preset", P_CUSTOM);
             SendStart();
         } else if (id == ID_BITRATE && code == EN_KILLFOCUS) {
             static std::wstring lastBitrate = L"0";
             std::wstring now = WindowText(g.bitrate);
             if (now != lastBitrate && g.conn.Connected()) SendStart();
             lastBitrate = now;
-        } else if (id == ID_MIRROR) {
+        } else if (id == ID_ADVANCED) {
+            g.advanced = !g.advanced;
+            settings::SetDword(L"Advanced", g.advanced ? 1 : 0);
+            SetWindowTextW(g.advancedBtn, g.advanced ? L"Réglages avancés  ▴" : L"Réglages avancés  ▾");
+            Layout(wnd);
+        } else if (id == ID_MIRROR || (id == ID_MIRROR_LABEL && code == STN_CLICKED)) {
+            if (id == ID_MIRROR_LABEL)
+                SendMessageW(g.mirror, BM_SETCHECK, SendMessageW(g.mirror, BM_GETCHECK, 0, 0) == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED, 0);
             g.optMirror = SendMessageW(g.mirror, BM_GETCHECK, 0, 0) == BST_CHECKED;
             settings::SetDword(L"Mirror", g.optMirror ? 1 : 0);
-        } else if (id == ID_ROTATE) {
+        } else if (id == ID_ROTATE || (id == ID_ROTATE_LABEL && code == STN_CLICKED)) {
+            if (id == ID_ROTATE_LABEL)
+                SendMessageW(g.rotate, BM_SETCHECK, SendMessageW(g.rotate, BM_GETCHECK, 0, 0) == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED, 0);
             g.optRotate = SendMessageW(g.rotate, BM_GETCHECK, 0, 0) == BST_CHECKED;
             settings::SetDword(L"Rotate", g.optRotate ? 1 : 0);
         } else if (id == ID_SMOOTH && code == CBN_SELCHANGE) {
@@ -975,6 +1277,7 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         std::unique_ptr<std::string> host(reinterpret_cast<std::string*>(lp));
         g.connecting = false;
         const bool usb = wp != 0;
+        g.viaUsb = usb;
         if (!usb && !host->empty()) settings::SetString(L"LastHost", W(*host)); // pour se reconnecter plus tard
         SendMessageW(g.smooth, CB_SETCURSEL, usb ? 0 : 1, 0);
         SetWindowTextW(g.connect, L"Déconnecter");
@@ -998,11 +1301,12 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
         FillCameras();
         FillCodecs();
         FillResolutions();
+        ApplyPresetToControls(); // préréglage mémorisé (par défaut « Meilleure qualité »)
         EnableStreamControls(true);
         if (g.caps.modes.empty()) {
-            SetStatus(L"Le téléphone n'annonce aucun mode vidéo utilisable.");
+            g.phoneMessage = L"Le téléphone n'annonce aucun mode vidéo utilisable.";
         } else {
-            SendStart(); // démarre directement avec le meilleur mode
+            SendStart();
         }
         return 0;
     }
@@ -1129,14 +1433,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show) {
     wc.lpfnWndProc = WndProc;
     wc.hInstance = inst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+    wc.hbrBackground = nullptr; // fond dessiné selon le thème (WM_ERASEBKGND)
     wc.lpszClassName = L"PhoneCamWnd";
     wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
     wc.hIconSm = wc.hIcon;
     RegisterClassExW(&wc);
 
     float scale = GetDpiForSystem() / 96.0f;
-    HWND wnd = CreateWindowExW(0, wc.lpszClassName, L"PhoneCam", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+    HWND wnd = CreateWindowExW(0, wc.lpszClassName, L"PhoneCam", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
                                int(1040 * scale), int(760 * scale), nullptr, nullptr, inst, nullptr);
     if (!g.startHidden) {
         ShowWindow(wnd, show);

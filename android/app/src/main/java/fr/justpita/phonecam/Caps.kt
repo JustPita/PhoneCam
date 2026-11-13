@@ -109,7 +109,7 @@ object Caps {
 
             for (size in sizes) {
                 val camFps = regularMaxFps(chars, size)
-                val hsFps = highSpeedFps(chars, size).maxOrNull() ?: 0
+                val hsList = highSpeedFps(chars, size)
                 for ((codec, vc) in encoders) {
                     val encFps = encoderMaxFps(vc, size.width, size.height)
                     if (encFps <= 0) continue
@@ -117,9 +117,11 @@ object Caps {
                     if (regular >= 10) {
                         modes += Mode(id, size.width, size.height, regular, false, codec)
                     }
-                    val hs = if (hsFps <= encFps) hsFps else highSpeedFps(chars, size).filter { it <= encFps }.maxOrNull() ?: 0
-                    if (hs > regular) {
-                        modes += Mode(id, size.width, size.height, hs, true, codec)
+                    // Haute vitesse : chaque fréquence fixe proposée (60, 120, 240…), au-delà du mode normal.
+                    for (hs in hsList) {
+                        if (hs > regular && hs <= encFps) {
+                            modes += Mode(id, size.width, size.height, hs, true, codec)
+                        }
                     }
                 }
             }
