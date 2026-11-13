@@ -1,0 +1,39 @@
+# Projet Xcode généré par XcodeGen (`xcodegen generate`), pour compiler sans Mac en local
+# (voir .github/workflows/ios.yml).
+name: PhoneCam
+options:
+  bundleIdPrefix: fr.justpita
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  PhoneCam:
+    type: application
+    platform: iOS
+    sources: [PhoneCam]
+    info:
+      path: PhoneCam/Info.plist
+      properties:
+        CFBundleDisplayName: PhoneCam
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UIStatusBarStyle: UIStatusBarStyleLightContent
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSCameraUsageDescription: "PhoneCam utilise la caméra pour en faire la webcam de votre PC."
+        NSLocalNetworkUsageDescription: "PhoneCam envoie la vidéo à votre PC et à OBS sur le réseau local."
+        NSBonjourServices:
+          - _phonecam._tcp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: fr.justpita.phonecam
+        MARKETING_VERSION: "2.0"
+        CURRENT_PROJECT_VERSION: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGNING_ALLOWED: "NO"
