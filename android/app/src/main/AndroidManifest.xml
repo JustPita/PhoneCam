@@ -15,12 +15,13 @@
     <application
         android:label="PhoneCam"
         android:icon="@drawable/ic_phonecam"
-        android:theme="@android:style/Theme.DeviceDefault.DayNight"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
         android:allowBackup="false">
 
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize"
             android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

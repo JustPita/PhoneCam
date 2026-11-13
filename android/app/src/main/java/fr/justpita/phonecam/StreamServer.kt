@@ -56,8 +56,52 @@ class StreamServer(private val ctx: Context, private val listener: Listener) {
     })
 
     val currentFormat: String get() = streamer.current
+    val streamInfo: CameraStreamer.Info? get() = streamer.info
 
-    private val capsText: String by lazy { Caps.helloText(Caps.collect(ctx)) }
+    private val caps: Caps.All by lazy { Caps.collect(ctx) }
+    private val capsText: String by lazy { Caps.helloText(caps) }
+
+    /** Aperçu à l'écran (null pour le retirer). */
+    fun setPreview(texture: android.graphics.SurfaceTexture?) = streamer.setPreview(texture)
+
+    /** Plusieurs caméras ? (pour afficher le bouton de changement) */
+    val cameraCount: Int get() = caps.cams.size
+
+    /**
+     * Passe à la caméra suivante depuis le téléphone, en gardant le codec et, si possible,
+     * la taille et la fréquence. Le PC est prévenu par le message de format habituel.
+     */
+    fun switchCamera() {
+        val cfg = streamer.lastConfig ?: return
+        val ids = caps.cams.map { it.id }
+        if (ids.size < 2) return
+        val next = ids[(ids.indexOf(cfg.cameraId) + 1).mod(ids.size)]
+        val modes = caps.modes.filter { it.cameraId == next && it.codec == cfg.codec }
+        if (modes.isEmpty()) return
+        val same = modes.filter { it.width == cfg.width && it.height == cfg.height }
+        val chosen = if (same.isNotEmpty()) {
+            same.maxBy { it.fps }
+        } else {
+            val area = cfg.width.toLong() * cfg.height
+            val is169 = { m: Caps.Mode -> m.width * 9 == m.height * 16 }
+            modes.filter { it.width.toLong() * it.height <= area }
+                .sortedWith(compareBy<Caps.Mode>({ !is169(it) }, { -(it.width.toLong() * it.height) }, { -it.fps }))
+                .firstOrNull() ?: modes.minBy { it.width.toLong() * it.height }
+        }
+        // Fréquence : celle demandée si possible (en normal, toute valeur ≤ max ; en haute vitesse, exacte).
+        val fps = when {
+            same.any { !it.highSpeed && it.fps >= cfg.fps } -> cfg.fps
+            same.any { it.highSpeed && it.fps == cfg.fps } -> cfg.fps
+            else -> minOf(cfg.fps, chosen.fps)
+        }
+        val keepBitrate = chosen.width == cfg.width && chosen.height == cfg.height && fps == cfg.fps
+        streamer.start(
+            cfg.copy(
+                cameraId = next, width = chosen.width, height = chosen.height, fps = fps,
+                bitrate = if (keepBitrate) cfg.bitrate else 0,
+            )
+        )
+    }
 
     fun start() {
         if (running) return
