@@ -15,6 +15,12 @@ pc/out/
 .vs/
 *.user
 
+# iOS (projet Xcode et Info.plist générés par XcodeGen)
+ios/build/
+ios/PhoneCam.xcodeproj/
+ios/PhoneCam/Info.plist
+*.ipa
+
 # Divers
 .DS_Store
 Thumbs.db
