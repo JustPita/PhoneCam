@@ -45,15 +45,66 @@ class StreamServer(private val ctx: Context, private val listener: Listener) {
     val framesSent = AtomicLong(0)
     val framesDropped = AtomicLong(0)
 
-    private val streamer = CameraStreamer(ctx, object : CameraStreamer.Sink {
-        override fun onFormat(text: String) = enqueue(Msg('F', text.toByteArray()))
+    private val streamer: CameraStreamer = CameraStreamer(ctx, object : CameraStreamer.Sink {
+        override fun onFormat(text: String) {
+            Regex("codec=(\\w+)").find(text)?.let { obs.setCodec(it.groupValues[1]) }
+            enqueue(Msg('F', text.toByteArray()))
+        }
         override fun onCodecConfig(data: ByteArray) = enqueue(Msg('C', data))
-        override fun onFrame(data: ByteArray, ptsUs: Long, keyFrame: Boolean) = enqueueVideo(data, ptsUs, keyFrame)
+        override fun onFrame(data: ByteArray, ptsUs: Long, keyFrame: Boolean) {
+            obs.pushFrame(data, ptsUs, keyFrame)
+            enqueueVideo(data, ptsUs, keyFrame)
+        }
         override fun onError(message: String) {
             enqueue(Msg('E', message.toByteArray()))
+            cameraOn = false
             listener.onStreaming(false)
         }
     })
+
+    // --- Flux réseau pour OBS ------------------------------------------------------------------
+    /** Le PC a demandé la capture (message S) et ne l'a pas arrêtée. */
+    @Volatile private var pcStreaming = false
+    @Volatile private var cameraOn = false
+
+    private val obs: ObsServer = ObsServer(object : ObsServer.Listener {
+        override fun onObsClients(count: Int) {
+            if (count > 0) {
+                if (!cameraOn) {
+                    // OBS seul : on démarre la caméra avec le dernier réglage, ou en 1080p30.
+                    streamer.start(streamer.lastConfig ?: defaultConfig())
+                    cameraOn = true
+                    listener.onStreaming(true)
+                } else {
+                    streamer.requestKeyFrame() // le nouveau lecteur démarre sur une image clé
+                }
+            } else if (!pcStreaming && cameraOn) {
+                streamer.stop()
+                cameraOn = false
+                listener.onStreaming(false)
+            }
+        }
+    })
+
+    val obsEnabled: Boolean get() = obsOn
+    val obsClients: Int get() = obs.clientCount
+    @Volatile private var obsOn = false
+
+    fun setObsEnabled(on: Boolean) {
+        if (on == obsOn) return
+        obsOn = on
+        if (on) obs.start() else obs.stop()
+    }
+
+    private fun defaultConfig(): CameraStreamer.Config {
+        val back = caps.cams.firstOrNull { it.facing == "back" } ?: caps.cams.firstOrNull()
+        val codec = "avc" // le plus compatible avec OBS
+        val modes = caps.modes.filter { it.cameraId == back?.id && it.codec == codec && !it.highSpeed }
+        val m = modes.firstOrNull { it.width == 1920 && it.height == 1080 }
+            ?: modes.filter { it.width * 9 == it.height * 16 && it.height <= 1080 }.maxByOrNull { it.width * it.height }
+            ?: modes.maxByOrNull { it.width * it.height }
+        return CameraStreamer.Config(back?.id ?: "0", m?.width ?: 1920, m?.height ?: 1080, minOf(30, m?.fps ?: 30), codec, 0)
+    }
 
     val currentFormat: String get() = streamer.current
     val streamInfo: CameraStreamer.Info? get() = streamer.info
@@ -114,6 +165,7 @@ class StreamServer(private val ctx: Context, private val listener: Listener) {
         running = false
         try { serverSocket?.close() } catch (_: IOException) {}
         try { client?.close() } catch (_: IOException) {}
+        obs.stop()
         streamer.shutdown()
         acceptThread?.interrupt()
         beaconThread?.interrupt()
@@ -157,8 +209,21 @@ class StreamServer(private val ctx: Context, private val listener: Listener) {
         }
     }
 
+    /** Le PC n'en veut plus : on n'arrête la caméra que si OBS ne regarde pas. */
+    private fun pcStopped() {
+        pcStreaming = false
+        if (obs.clientCount == 0) {
+            streamer.stop()
+            cameraOn = false
+            listener.onStreaming(false)
+        }
+    }
+
     private fun handleClient(s: Socket) {
-        streamer.stop()
+        if (obs.clientCount == 0) {
+            streamer.stop()
+            cameraOn = false
+        }
         val q = LinkedBlockingDeque<Msg>()
         queue = q
         queuedVideo.set(0)
@@ -187,13 +252,12 @@ class StreamServer(private val ctx: Context, private val listener: Listener) {
                         q.removeIf { it.video }
                         queuedVideo.set(0)
                         streamer.start(CameraStreamer.Config.parse(String(payload)))
+                        pcStreaming = true
+                        cameraOn = true
                         listener.onStreaming(true)
                     }
                     'K' -> streamer.requestKeyFrame()
-                    'X' -> {
-                        streamer.stop()
-                        listener.onStreaming(false)
-                    }
+                    'X' -> pcStopped()
                 }
             }
         } catch (e: IOException) {
@@ -201,8 +265,7 @@ class StreamServer(private val ctx: Context, private val listener: Listener) {
         } finally {
             if (client === s) {
                 client = null
-                streamer.stop()
-                listener.onStreaming(false)
+                pcStopped()
                 listener.onClientChanged(null)
             }
             try { s.close() } catch (_: IOException) {}

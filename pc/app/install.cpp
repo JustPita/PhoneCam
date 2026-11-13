@@ -184,8 +184,13 @@ static void FirewallRule(bool add, const std::wstring& exe) {
     DWORD code;
     RunHidden(std::wstring(L"netsh advfirewall firewall delete rule name=\"") + kFirewallRule + L"\"", &out, &code);
     if (add) {
+        // Découverte Wi-Fi (balises UDP des téléphones)
         RunHidden(std::wstring(L"netsh advfirewall firewall add rule name=\"") + kFirewallRule +
                       L"\" dir=in action=allow protocol=UDP localport=38501 profile=private,domain program=\"" + exe + L"\"",
+                  &out, &code);
+        // Flux réseau pour OBS (seulement si l'option est activée dans l'application)
+        RunHidden(std::wstring(L"netsh advfirewall firewall add rule name=\"") + kFirewallRule +
+                      L"\" dir=in action=allow protocol=TCP localport=38510 profile=private,domain program=\"" + exe + L"\"",
                   &out, &code);
     }
 }

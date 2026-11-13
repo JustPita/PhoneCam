@@ -29,6 +29,8 @@ class StreamService : Service(), StreamServer.Listener {
         startForeground(NOTIF_ID, notification("En attente du PC"), ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
         server = StreamServer(this, this).also {
             it.start()
+            // Flux OBS : seulement s'il avait été activé la dernière fois.
+            if (getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_OBS, false)) it.setObsEnabled(true)
             instance = it
         }
         State.running = true
@@ -82,7 +84,8 @@ class StreamService : Service(), StreamServer.Listener {
 
     private fun updateNotification() {
         val text = when {
-            State.streaming -> "Diffusion vers ${State.client ?: "le PC"}"
+            State.streaming && State.client == null -> "Diffusion pour OBS"
+            State.streaming -> "Diffusion vers ${State.client}"
             State.client != null -> "Connecté à ${State.client}"
             else -> "En attente du PC"
         }
@@ -112,6 +115,8 @@ class StreamService : Service(), StreamServer.Listener {
     companion object {
         private const val CHANNEL = "phonecam"
         private const val NOTIF_ID = 1
+        const val PREFS = "phonecam"
+        const val PREF_OBS = "obsEnabled"
         @Volatile var instance: StreamServer? = null
     }
 }

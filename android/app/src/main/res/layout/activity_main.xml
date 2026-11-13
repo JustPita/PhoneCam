@@ -85,7 +85,7 @@
         android:paddingBottom="28dp">
 
         <LinearLayout
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:gravity="center_vertical"
             android:orientation="horizontal">
@@ -99,11 +99,25 @@
 
             <TextView
                 android:id="@+id/status"
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="10dp"
+                android:layout_weight="1"
                 android:textColor="#FFFFFF"
                 android:textSize="17sp"
+                android:textStyle="bold" />
+
+            <!-- Flux réseau pour OBS (désactivé par défaut, mémorisé) -->
+            <TextView
+                android:id="@+id/obsButton"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:background="@drawable/bg_pill"
+                android:gravity="center"
+                android:paddingHorizontal="14dp"
+                android:text="OBS"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp"
                 android:textStyle="bold" />
         </LinearLayout>
 
