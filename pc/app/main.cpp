@@ -1323,6 +1323,20 @@ static LRESULT CALLBACK WndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.writerReset = true; // le fil réseau rouvrira la mémoire partagée de la nouvelle source
             g.vcam.Remove();
         }
+        // Les listes suivent ce que le téléphone envoie vraiment (changement de caméra depuis le téléphone,
+        // fréquence ajustée…), sans renvoyer de demande.
+        for (size_t i = 0; i < g.caps.cams.size(); ++i) {
+            if (g.caps.cams[i].id != kv["camera"]) continue;
+            if (int(SendMessageW(g.camera, CB_GETCURSEL, 0, 0)) != int(i)) {
+                SendMessageW(g.camera, CB_SETCURSEL, i, 0);
+                settings::SetString(L"CameraFacing", W(g.caps.cams[i].facing));
+                FillResolutions();
+            }
+        }
+        SelectExact(g.codec, kv["codec"] == "hevc" ? L"HEVC" : L"H.264");
+        SelectExact(g.res, std::to_wstring(fw) + L"×" + std::to_wstring(fh));
+        FillFps();
+        SelectExact(g.fps, std::to_wstring(ff) + L" ");
         EnsureVirtualCamera();
         UpdateStats();
         return 0;

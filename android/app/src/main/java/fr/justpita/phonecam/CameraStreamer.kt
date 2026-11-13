@@ -2,6 +2,7 @@ package fr.justpita.phonecam
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession
@@ -80,8 +81,54 @@ class CameraStreamer(private val ctx: Context, private val sink: Sink) {
     var current: String = ""
         private set
 
+    /** Dernière configuration réellement appliquée (fps ajusté, débit calculé). */
+    @Volatile
+    var lastConfig: Config? = null
+        private set
+
+    /** Infos pour l'aperçu à l'écran : taille du flux, caméra avant ou non. */
+    data class Info(val width: Int, val height: Int, val front: Boolean, val highSpeed: Boolean, val sensorOrientation: Int)
+
+    @Volatile
+    var info: Info? = null
+        private set
+
+    /** Session en cours : ce qu'il faut pour la reconstruire (ajout/retrait de l'aperçu). */
+    private class Active(
+        val gen: Int,
+        val cam: CameraDevice,
+        val encSurface: Surface,
+        val highSpeed: Boolean,
+        val aeRange: Range<Int>,
+        val chars: CameraCharacteristics,
+        val cfg: Config,
+    ) {
+        var formatSent = false
+    }
+
+    private var active: Active? = null
+    private var previewTexture: SurfaceTexture? = null
+    private var previewSurface: Surface? = null
+
     fun start(cfg: Config) {
         camHandler.post { startOnCamThread(cfg) }
+    }
+
+    /**
+     * Branche (ou débranche avec null) l'aperçu à l'écran. Si une capture tourne, la session est
+     * reconstruite : l'encodeur continue, le PC voit au plus une courte pause.
+     * Attend la fin de l'opération pour que l'appelant puisse libérer la texture ensuite.
+     */
+    fun setPreview(texture: SurfaceTexture?) {
+        val done = CountDownLatch(1)
+        camHandler.post {
+            if (previewTexture !== texture) {
+                previewTexture = texture
+                active?.let { if (it.gen == generation) createSession(it) }
+            }
+            done.countDown()
+        }
+        done.await(2, TimeUnit.SECONDS)
     }
 
     /** Arrête la capture et attend que tout soit libéré. */
@@ -112,8 +159,12 @@ class CameraStreamer(private val ctx: Context, private val sink: Sink) {
 
     private fun releaseOnCamThread() {
         generation++
+        active = null
+        info = null
         try { session?.close() } catch (_: Exception) {}
         try { device?.close() } catch (_: Exception) {}
+        try { previewSurface?.release() } catch (_: Exception) {}
+        previewSurface = null
         try { encoder?.stop() } catch (_: Exception) {}
         try { encoder?.release() } catch (_: Exception) {}
         try { inputSurface?.release() } catch (_: Exception) {}
@@ -261,7 +312,9 @@ class CameraStreamer(private val ctx: Context, private val sink: Sink) {
                         return
                     }
                     device = cam
-                    createSession(gen, cam, surface, highSpeed, aeRange, chars, cfg)
+                    val a = Active(gen, cam, surface, highSpeed, aeRange, chars, cfg)
+                    active = a
+                    createSession(a)
                 }
 
                 override fun onDisconnected(cam: CameraDevice) {
@@ -279,20 +332,39 @@ class CameraStreamer(private val ctx: Context, private val sink: Sink) {
         }
     }
 
-    private fun createSession(
-        gen: Int,
-        cam: CameraDevice,
-        surface: Surface,
-        highSpeed: Boolean,
-        aeRange: Range<Int>,
-        chars: CameraCharacteristics,
-        cfg: Config,
-    ) {
+    /** Aperçu refusé par la caméra pour ce mode (on diffuse alors sans aperçu). */
+    private var previewRejectedFor: Config? = null
+
+    private fun createSession(a: Active) {
+        val gen = a.gen
+        val cam = a.cam
+        val surface = a.encSurface
+        val highSpeed = a.highSpeed
+        val aeRange = a.aeRange
+        val chars = a.chars
+        val cfg = a.cfg
+
+        try { session?.close() } catch (_: Exception) {}
+        session = null
+        try { previewSurface?.release() } catch (_: Exception) {}
+        previewSurface = null
+
+        // Aperçu : même taille que le flux (obligatoire en haute vitesse, et sans mise à l'échelle sinon).
+        val texture = previewTexture
+        val preview = if (texture != null && previewRejectedFor != cfg) {
+            texture.setDefaultBufferSize(cfg.width, cfg.height)
+            Surface(texture).also { previewSurface = it }
+        } else {
+            null
+        }
+        val outputs = mutableListOf(OutputConfiguration(surface))
+        if (preview != null) outputs += OutputConfiguration(preview)
+
         val type = if (highSpeed) SessionConfiguration.SESSION_HIGH_SPEED else SessionConfiguration.SESSION_REGULAR
-        val sc = SessionConfiguration(type, listOf(OutputConfiguration(surface)), camExecutor,
+        val sc = SessionConfiguration(type, outputs, camExecutor,
             object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(s: CameraCaptureSession) {
-                    if (gen != generation) {
+                    if (gen != generation || active !== a) {
                         s.close()
                         return
                     }
@@ -300,6 +372,7 @@ class CameraStreamer(private val ctx: Context, private val sink: Sink) {
                     try {
                         val req = cam.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                             addTarget(surface)
+                            if (preview != null) addTarget(preview)
                             set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, aeRange)
                             val afModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ?: intArrayOf()
                             if (CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO in afModes) {
@@ -320,17 +393,33 @@ class CameraStreamer(private val ctx: Context, private val sink: Sink) {
                     }
                     val facing = Caps.facingName(chars.get(CameraCharacteristics.LENS_FACING))
                     val orientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
-                    current = "${cfg.width}×${cfg.height} @ ${cfg.fps} i/s ${cfg.codec.uppercase()} " +
-                        "${cfg.bitrate / 1_000_000} Mb/s${if (highSpeed) " (haute vitesse)" else ""}"
-                    sink.onFormat(
-                        "codec=${cfg.codec} width=${cfg.width} height=${cfg.height} fps=${cfg.fps} " +
-                            "bitrate=${cfg.bitrate} camera=${cfg.cameraId} facing=$facing " +
-                            "orientation=$orientation highspeed=${if (highSpeed) 1 else 0}"
-                    )
+                    info = Info(cfg.width, cfg.height, facing == "front", highSpeed, orientation)
+                    if (!a.formatSent) {
+                        // Le PC n'est prévenu qu'au premier démarrage, pas quand on ajoute/retire l'aperçu.
+                        a.formatSent = true
+                        lastConfig = cfg
+                        current = "${cfg.width}×${cfg.height} @ ${cfg.fps} i/s ${cfg.codec.uppercase()} " +
+                            "${cfg.bitrate / 1_000_000} Mb/s${if (highSpeed) " (haute vitesse)" else ""}"
+                        sink.onFormat(
+                            "codec=${cfg.codec} width=${cfg.width} height=${cfg.height} fps=${cfg.fps} " +
+                                "bitrate=${cfg.bitrate} camera=${cfg.cameraId} facing=$facing " +
+                                "orientation=$orientation highspeed=${if (highSpeed) 1 else 0}"
+                        )
+                    } else {
+                        requestKeyFrame()
+                    }
                 }
 
                 override fun onConfigureFailed(s: CameraCaptureSession) {
-                    if (gen == generation) fail("Session caméra refusée pour ${cfg.width}×${cfg.height} @ ${cfg.fps}")
+                    if (gen != generation || active !== a) return
+                    if (preview != null) {
+                        // Certains modes n'acceptent pas de 2e sortie : on diffuse sans aperçu.
+                        Log.w(TAG, "aperçu refusé pour ${cfg.width}×${cfg.height} @ ${cfg.fps}")
+                        previewRejectedFor = cfg
+                        createSession(a)
+                    } else {
+                        fail("Session caméra refusée pour ${cfg.width}×${cfg.height} @ ${cfg.fps}")
+                    }
                 }
             })
         try {
