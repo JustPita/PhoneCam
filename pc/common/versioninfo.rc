@@ -1,0 +1,32 @@
+// Ressource VERSIONINFO commune (nom du produit, version), incluse par app.rc et vcamsource.rc.
+// Avant l'inclusion, définir PHONECAM_FILE_DESCRIPTION, PHONECAM_ORIGINAL_FILENAME et PHONECAM_FILE_TYPE.
+#include "version.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION PHONECAM_VERSION_MAJOR, PHONECAM_VERSION_MINOR, PHONECAM_VERSION_PATCH, 0
+ PRODUCTVERSION PHONECAM_VERSION_MAJOR, PHONECAM_VERSION_MINOR, PHONECAM_VERSION_PATCH, 0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE PHONECAM_FILE_TYPE
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040C04B0"
+        BEGIN
+            VALUE "CompanyName", "JustPita"
+            VALUE "FileDescription", PHONECAM_FILE_DESCRIPTION
+            VALUE "FileVersion", PHONECAM_VERSION_STR
+            VALUE "InternalName", PHONECAM_ORIGINAL_FILENAME
+            VALUE "LegalCopyright", "Copyright (c) 2026 JustPita - licence MIT"
+            VALUE "OriginalFilename", PHONECAM_ORIGINAL_FILENAME
+            VALUE "ProductName", "PhoneCam"
+            VALUE "ProductVersion", PHONECAM_VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x040C, 1200
+    END
+END

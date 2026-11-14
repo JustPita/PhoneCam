@@ -5,3 +5,8 @@
 
 // DLL de la caméra virtuelle, extraite et enregistrée par « PhoneCam.exe --install ».
 2 RCDATA "PhoneCamSource.dll"
+
+#define PHONECAM_FILE_DESCRIPTION "PhoneCam - camera du telephone comme webcam"
+#define PHONECAM_ORIGINAL_FILENAME "PhoneCam.exe"
+#define PHONECAM_FILE_TYPE VFT_APP
+#include "../common/versioninfo.rc"

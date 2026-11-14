@@ -1,0 +1,6 @@
+#include <winres.h>
+
+#define PHONECAM_FILE_DESCRIPTION "PhoneCam - source de la camera virtuelle"
+#define PHONECAM_ORIGINAL_FILENAME "PhoneCamSource.dll"
+#define PHONECAM_FILE_TYPE VFT_DLL
+#include "../common/versioninfo.rc"

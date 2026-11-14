@@ -145,19 +145,21 @@ SignPath configuré (secret `SIGNPATH_API_TOKEN`, variable `SIGNPATH_ORGANIZATIO
 signer la DLL de caméra virtuelle, recompile l'exe avec la DLL signée, puis fait signer l'exe.
 Les configurations d'artefacts SignPath sont dans `.signpath/artifact-configurations/`.
 
-## Politique de signature de code
+## Code signing policy
 
-Les versions Windows de PhoneCam publiées dans les releases sont destinées à être signées
-gratuitement par [SignPath.io](https://signpath.io), avec un certificat fourni par la
+*Politique de signature de code.*
+
+Free code signing provided by [SignPath.io](https://signpath.io), certificate by
 [SignPath Foundation](https://signpath.org).
 
-- **Compilation** : uniquement depuis ce dépôt public, par GitHub Actions (workflow `Windows`),
-  sans intervention manuelle sur les fichiers.
-- **Auteurs et validation** : [JustPita](https://github.com/JustPita) (auteur, relecture et
-  approbation des signatures).
-- **Confidentialité** : PhoneCam ne transmet aucune donnée hors de votre réseau local. La vidéo va
-  du téléphone au PC (et, si vous l'activez, à OBS) ; aucun compte, aucune télémétrie, aucun
-  serveur externe.
+- **Committers and reviewers** (auteurs et relecture) : [JustPita](https://github.com/JustPita)
+- **Approvers** (approbation de chaque signature) : [JustPita](https://github.com/JustPita)
+- **Build** : les binaires signés sont compilés uniquement depuis ce dépôt public par GitHub Actions
+  (workflow `Windows`), sans intervention manuelle ; chaque signature est approuvée manuellement.
+- **Privacy policy** : This program will not transfer any information to other networked systems
+  unless specifically requested by the user or the person installing or operating it.
+  *PhoneCam ne transmet rien hors de votre réseau local : la vidéo va du téléphone au PC (et à OBS
+  si vous activez le flux réseau) ; aucun compte, aucune télémétrie, aucun serveur externe.*
 
 ## Diagnostic
 
