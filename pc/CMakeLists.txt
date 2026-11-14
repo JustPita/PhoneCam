@@ -15,7 +15,10 @@ add_library(PhoneCamSource SHARED
     vcamsource/mediastream.cpp
     vcamsource/frames.cpp
     vcamsource/vcamsource.def
+    vcamsource/vcamsource.rc
 )
+set_source_files_properties(vcamsource/vcamsource.rc PROPERTIES
+    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/common/versioninfo.rc;${CMAKE_CURRENT_SOURCE_DIR}/common/version.h")
 target_link_libraries(PhoneCamSource PRIVATE mfplat mfuuid mf advapi32)
 # Signature Authenticode (sans effet tant qu'aucun certificat n'est configuré, voir tools/sign.cmd).
 # La DLL est signée avant d'être embarquée dans l'exe.
@@ -38,7 +41,7 @@ add_executable(PhoneCam WIN32
 add_dependencies(PhoneCam PhoneCamSource)
 target_include_directories(PhoneCam PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 set_source_files_properties(app/app.rc PROPERTIES
-    OBJECT_DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/PhoneCamSource.dll;${CMAKE_CURRENT_SOURCE_DIR}/app/app.manifest;${CMAKE_CURRENT_SOURCE_DIR}/app/phonecam.ico")
+    OBJECT_DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/PhoneCamSource.dll;${CMAKE_CURRENT_SOURCE_DIR}/app/app.manifest;${CMAKE_CURRENT_SOURCE_DIR}/app/phonecam.ico;${CMAKE_CURRENT_SOURCE_DIR}/common/versioninfo.rc;${CMAKE_CURRENT_SOURCE_DIR}/common/version.h")
 # Outil de diagnostic : lit quelques images de la webcam « PhoneCam ».
 add_executable(camtest tools/camtest.cpp)
 # Outil de diagnostic : lit et décode le flux réseau « OBS » (MPEG-TS sur HTTP).

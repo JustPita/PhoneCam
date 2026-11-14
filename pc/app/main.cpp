@@ -1461,7 +1461,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show) {
     if (installer::Needed()) {
         int answer = MessageBoxW(nullptr,
                                  L"PhoneCam doit installer sa caméra virtuelle (une seule fois, droits administrateur).\n\n"
-                                 L"L'application sera copiée dans Program Files et ajoutée au menu Démarrer.\n\nInstaller maintenant ?",
+                                 L"L'installation va :\n"
+                                 L"  •  copier PhoneCam dans Program Files et l'ajouter au menu Démarrer ;\n"
+                                 L"  •  enregistrer la caméra virtuelle « PhoneCam » auprès de Windows ;\n"
+                                 L"  •  autoriser PhoneCam dans le pare-feu, sur les réseaux privés uniquement\n"
+                                 L"     (UDP 38501 : détection des téléphones ; TCP 38510 : flux OBS, s'il est activé) ;\n"
+                                 L"  •  lancer PhoneCam au démarrage de Windows (désactivable dans le menu de l'icône).\n\n"
+                                 L"Désinstallation : Paramètres › Applications › PhoneCam.\n\nInstaller maintenant ?",
                                  L"PhoneCam", MB_YESNO | MB_ICONINFORMATION);
         if (answer != IDYES) return 0;
         int code = installer::RunElevated(L"--install");

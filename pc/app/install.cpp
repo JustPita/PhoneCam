@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "../common/shared_frame.h"
+#include "../common/version.h"
 #include "net.h"
 
 using Microsoft::WRL::ComPtr;
@@ -168,7 +169,7 @@ static void RegisterUninstall(const std::wstring& exe) {
     if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, kUninstallKey, 0, nullptr, 0, KEY_WRITE, nullptr, &k, nullptr) != ERROR_SUCCESS)
         return;
     SetString(k, L"DisplayName", L"PhoneCam");
-    SetString(k, L"DisplayVersion", L"2.0.1");
+    SetString(k, L"DisplayVersion", PHONECAM_VERSION_WSTR);
     SetString(k, L"Publisher", L"JustPita");
     SetString(k, L"DisplayIcon", exe);
     SetString(k, L"InstallLocation", InstallDir());
