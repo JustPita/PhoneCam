@@ -111,6 +111,35 @@ pc\build.cmd
 
 Produit `pc\build\PhoneCam.exe` (avec la DLL embarquée) et `pc\build\camtest.exe`.
 
+## Signature
+
+### APK
+
+La clé de signature n'est jamais dans le dépôt. Gradle la cherche dans les variables d'environnement
+`PHONECAM_KEYSTORE`, `PHONECAM_KEYSTORE_PASSWORD`, `PHONECAM_KEY_ALIAS`, `PHONECAM_KEY_PASSWORD`,
+puis dans `android/keystore.properties` ou `~/.phonecam-signing/keystore.properties` :
+
+```properties
+storeFile=C:/chemin/phonecam-release.jks
+storePassword=...
+keyAlias=phonecam
+keyPassword=...
+```
+
+Sans clé, l'APK release est signé avec la clé de debug. Le workflow **Android** compile l'APK signé
+grâce aux secrets du dépôt (`PHONECAM_KEYSTORE_B64` = keystore en base64, et les trois autres), et
+le joint automatiquement à chaque release publiée.
+
+### Exe
+
+`pc\tools\sign.cmd` signe la DLL puis l'exe à chaque compilation, dès qu'un certificat de
+**signature de code** est configuré (un certificat de site web/TLS ne convient pas) :
+
+- certificat dans le magasin Windows (Certum SimplySign, jeton USB…) : `set PHONECAM_SIGN_THUMBPRINT=<empreinte SHA-1>` ;
+- ou fichier PFX : `set PHONECAM_SIGN_PFX=...` et `set PHONECAM_SIGN_PFX_PASSWORD=...`.
+
+Sans certificat, la compilation fonctionne et l'exe n'est pas signé.
+
 ## Diagnostic
 
 - La fenêtre PhoneCam affiche en continu le débit, les images reçues et décodées, et la régularité

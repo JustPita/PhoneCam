@@ -1,0 +1,72 @@
+name: Android
+
+on:
+  push:
+    branches: [main]
+    paths: ["android/**", ".github/workflows/android.yml"]
+  pull_request:
+    paths: ["android/**", ".github/workflows/android.yml"]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release à compléter avec l'APK signé (ex. v2.0.0), vide pour une simple compilation"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.ref }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # La clé n'existe que dans les secrets du dépôt : absente (PR d'un fork), l'APK est signé en debug.
+      - name: Clé de signature
+        env:
+          KEYSTORE_B64: ${{ secrets.PHONECAM_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/phonecam-release.jks"
+            echo "PHONECAM_KEYSTORE=$RUNNER_TEMP/phonecam-release.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Pas de clé de signature : APK signé avec la clé de debug."
+          fi
+
+      - name: Compilation
+        env:
+          PHONECAM_KEYSTORE_PASSWORD: ${{ secrets.PHONECAM_KEYSTORE_PASSWORD }}
+          PHONECAM_KEY_ALIAS: ${{ secrets.PHONECAM_KEY_ALIAS }}
+          PHONECAM_KEY_PASSWORD: ${{ secrets.PHONECAM_KEY_PASSWORD }}
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --console=plain
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/PhoneCam.apk"
+
+      - name: Vérification de la signature
+        run: |
+          APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner
+          "$APKSIGNER" verify --print-certs PhoneCam.apk | grep -E "DN|SHA-256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PhoneCam-apk
+          path: PhoneCam.apk
+
+      - name: Ajout à la release
+        if: env.TAG != '' && env.PHONECAM_KEYSTORE != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" PhoneCam.apk --clobber
