@@ -58,7 +58,13 @@ jobs:
       - name: Vérification de la signature
         run: |
           APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner
-          "$APKSIGNER" verify --print-certs PhoneCam.apk | grep -E "DN|SHA-256"
+          CERTS=$("$APKSIGNER" verify --print-certs PhoneCam.apk)
+          echo "$CERTS" | grep -E "DN|SHA-256"
+          # Clé disponible mais APK signé en debug (code trop ancien, ex. ancienne étiquette) : on n'envoie rien.
+          if [ -n "$PHONECAM_KEYSTORE" ] && echo "$CERTS" | grep -q "CN=Android Debug"; then
+            echo "::error::APK signé avec la clé de debug alors que la clé de publication est disponible."
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v5
         with:
