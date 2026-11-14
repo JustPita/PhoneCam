@@ -1,0 +1,125 @@
+name: Windows
+
+# Compile PhoneCam.exe (avec la DLL de caméra virtuelle embarquée) et, si SignPath est configuré,
+# fait signer la DLL puis l'exe par SignPath Foundation. Sans SignPath : exe non signé.
+#
+# Configuration SignPath (une fois le projet accepté) :
+#   secret    SIGNPATH_API_TOKEN        jeton d'API d'un utilisateur CI SignPath
+#   variable  SIGNPATH_ORGANIZATION_ID  identifiant de l'organisation SignPath
+#   variable  SIGNPATH_PROJECT_SLUG     (facultatif, défaut : PhoneCam)
+#   variable  SIGNPATH_POLICY_SLUG      (facultatif, défaut : release-signing)
+# Configurations d'artefacts à créer dans le projet SignPath : « dll » et « exe »
+# (contenu dans .signpath/artifact-configurations/).
+
+on:
+  push:
+    branches: [main]
+    paths: ["pc/**", ".github/workflows/windows.yml", ".signpath/**"]
+  pull_request:
+    paths: ["pc/**", ".github/workflows/windows.yml", ".signpath/**"]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release à compléter avec l'exe (ex. v2.0.1), vide pour une simple compilation"
+        required: false
+
+permissions:
+  contents: write
+  actions: read # SignPath télécharge l'artefact à signer
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      SIGNPATH: ${{ secrets.SIGNPATH_API_TOKEN != '' && vars.SIGNPATH_ORGANIZATION_ID != '' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag || github.ref }}
+
+      - name: Compilation
+        shell: cmd
+        run: pc\build.cmd
+
+      # --- 1. DLL : signée avant d'être embarquée dans l'exe -------------------------------
+      - name: DLL à signer
+        id: dll
+        if: env.SIGNPATH == 'true'
+        uses: actions/upload-artifact@v5
+        with:
+          name: PhoneCamSource-unsigned
+          path: pc/build/PhoneCamSource.dll
+
+      - name: Signature de la DLL (SignPath)
+        if: env.SIGNPATH == 'true'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'PhoneCam' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: dll
+          github-artifact-id: ${{ steps.dll.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-dll
+
+      - name: Recompilation de l'exe avec la DLL signée
+        if: env.SIGNPATH == 'true'
+        shell: pwsh
+        run: |
+          Copy-Item signed-dll\PhoneCamSource.dll pc\build\PhoneCamSource.dll -Force
+          (Get-Item pc\build\PhoneCamSource.dll).LastWriteTime = Get-Date
+          cmd /c pc\build.cmd
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # --- 2. Exe ---------------------------------------------------------------------------
+      - name: Exe à signer
+        id: exe
+        if: env.SIGNPATH == 'true'
+        uses: actions/upload-artifact@v5
+        with:
+          name: PhoneCam-unsigned
+          path: pc/build/PhoneCam.exe
+
+      - name: Signature de l'exe (SignPath)
+        if: env.SIGNPATH == 'true'
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'PhoneCam' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: exe
+          github-artifact-id: ${{ steps.exe.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-exe
+
+      # --- 3. Résultat ------------------------------------------------------------------------
+      - name: Vérification
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          $src = if ($env:SIGNPATH -eq 'true') { 'signed-exe\PhoneCam.exe' } else { 'pc\build\PhoneCam.exe' }
+          Copy-Item $src out\PhoneCam.exe -Force
+          $sig = Get-AuthenticodeSignature out\PhoneCam.exe
+          "Signature : $($sig.Status) $($sig.SignerCertificate.Subject)"
+          if ($env:SIGNPATH -eq 'true' -and $sig.Status -ne 'Valid') {
+            Write-Output "::error::SignPath est configuré mais l'exe n'est pas correctement signé."
+            exit 1
+          }
+          if ($env:SIGNPATH -ne 'true') { Write-Output "::warning::SignPath non configuré : exe non signé." }
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: PhoneCam-exe
+          path: out/PhoneCam.exe
+
+      - name: Ajout à la release
+        if: env.TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release upload "$env:TAG" out\PhoneCam.exe --clobber
