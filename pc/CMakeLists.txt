@@ -17,6 +17,10 @@ add_library(PhoneCamSource SHARED
     vcamsource/vcamsource.def
 )
 target_link_libraries(PhoneCamSource PRIVATE mfplat mfuuid mf advapi32)
+# Signature Authenticode (sans effet tant qu'aucun certificat n'est configuré, voir tools/sign.cmd).
+# La DLL est signée avant d'être embarquée dans l'exe.
+add_custom_command(TARGET PhoneCamSource POST_BUILD
+    COMMAND cmd /c "${CMAKE_CURRENT_SOURCE_DIR}/tools/sign.cmd" "$<TARGET_FILE:PhoneCamSource>")
 
 # --- Application ---------------------------------------------------------------
 add_executable(PhoneCam WIN32
@@ -39,6 +43,9 @@ set_source_files_properties(app/app.rc PROPERTIES
 add_executable(camtest tools/camtest.cpp)
 # Outil de diagnostic : lit et décode le flux réseau « OBS » (MPEG-TS sur HTTP).
 add_executable(tstest tools/tstest.cpp)
+
+add_custom_command(TARGET PhoneCam POST_BUILD
+    COMMAND cmd /c "${CMAKE_CURRENT_SOURCE_DIR}/tools/sign.cmd" "$<TARGET_FILE:PhoneCam>")
 
 # Le manifeste (contrôles communs v6, DPI, UTF-8) est fourni par app.rc.
 target_link_options(PhoneCam PRIVATE /MANIFEST:NO)
